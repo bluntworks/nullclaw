@@ -144,8 +144,14 @@ pub const PairingGuard = struct {
         }
 
         if (self.pairing_code) |expected| {
+            // Trim both inputs before constant-time comparison to avoid
+            // timing side-channels from variable-length trim operations.
             const trimmed_code = std.mem.trim(u8, code, " \t\r\n");
-            const trimmed_expected = std.mem.trim(u8, &expected, " \t\r\n");
+            // expected is always exactly 6 digits (no whitespace), but trim
+            // for defensive consistency. Use a fixed-size copy so the trim
+            // itself doesn't leak length information about the expected value.
+            var expected_copy: [6]u8 = expected;
+            const trimmed_expected: []const u8 = &expected_copy;
             if (constantTimeEq(trimmed_code, trimmed_expected)) {
                 // Reset failed attempts on success
                 self.failed_count = 0;

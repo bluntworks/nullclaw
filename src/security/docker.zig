@@ -86,7 +86,23 @@ pub const DockerSandbox = struct {
     }
 };
 
-pub fn createDockerSandbox(allocator: std.mem.Allocator, workspace_dir: []const u8, image: ?[]const u8) DockerSandbox {
+pub const CreateError = error{
+    WorkspacePathTooLong,
+    WorkspacePathInvalid,
+    WorkspacePathContainsColon,
+};
+
+pub fn createDockerSandbox(allocator: std.mem.Allocator, workspace_dir: []const u8, image: ?[]const u8) CreateError!DockerSandbox {
+    // Reject paths that exceed the mount buffer capacity.
+    if (workspace_dir.len > MAX_WORKSPACE_LEN) return error.WorkspacePathTooLong;
+
+    // Validate workspace path against dangerous mounts, traversals, etc.
+    const validation = validateWorkspaceMount(workspace_dir, null);
+    if (!validation.isValid()) return error.WorkspacePathInvalid;
+
+    // Colons in the path would corrupt Docker -v mount argument semantics.
+    if (std.mem.indexOfScalar(u8, workspace_dir, ':') != null) return error.WorkspacePathContainsColon;
+
     var ds = DockerSandbox{
         .allocator = allocator,
         .workspace_dir = workspace_dir,
@@ -94,11 +110,10 @@ pub fn createDockerSandbox(allocator: std.mem.Allocator, workspace_dir: []const 
     };
     // Pre-build "workspace_dir:workspace_dir" mount argument
     const wd = workspace_dir;
-    const max = @min(wd.len, MAX_WORKSPACE_LEN);
-    @memcpy(ds.mount_arg_buf[0..max], wd[0..max]);
-    ds.mount_arg_buf[max] = ':';
-    @memcpy(ds.mount_arg_buf[max + 1 ..][0..max], wd[0..max]);
-    ds.mount_arg_len = max * 2 + 1;
+    @memcpy(ds.mount_arg_buf[0..wd.len], wd);
+    ds.mount_arg_buf[wd.len] = ':';
+    @memcpy(ds.mount_arg_buf[wd.len + 1 ..][0..wd.len], wd);
+    ds.mount_arg_len = wd.len * 2 + 1;
     return ds;
 }
 
@@ -247,21 +262,37 @@ fn isUnderRoot(path: []const u8, root: []const u8) bool {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
+test "docker sandbox rejects dangerous path" {
+    try std.testing.expectError(error.WorkspacePathInvalid, createDockerSandbox(std.testing.allocator, "/etc", null));
+    try std.testing.expectError(error.WorkspacePathInvalid, createDockerSandbox(std.testing.allocator, "/", null));
+    try std.testing.expectError(error.WorkspacePathInvalid, createDockerSandbox(std.testing.allocator, "", null));
+    try std.testing.expectError(error.WorkspacePathInvalid, createDockerSandbox(std.testing.allocator, "/home/user/../etc/shadow", null));
+}
+
+test "docker sandbox rejects path with colon" {
+    try std.testing.expectError(error.WorkspacePathContainsColon, createDockerSandbox(std.testing.allocator, "/tmp/a:b", null));
+}
+
+test "docker sandbox rejects oversized path" {
+    const long_path = "/" ++ "a" ** MAX_WORKSPACE_LEN;
+    try std.testing.expectError(error.WorkspacePathTooLong, createDockerSandbox(std.testing.allocator, long_path, null));
+}
+
 test "docker sandbox name" {
-    var dk = createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
+    var dk = try createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
     const sb = dk.sandbox();
     try std.testing.expectEqualStrings("docker", sb.name());
 }
 
 test "docker sandbox isAvailable returns bool" {
-    var dk = createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
+    var dk = try createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
     const sb = dk.sandbox();
     // isAvailable now checks for real docker binary; result depends on environment
     _ = sb.isAvailable();
 }
 
 test "docker sandbox wrap command prepends docker run" {
-    var dk = createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
+    var dk = try createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
     const sb = dk.sandbox();
 
     const argv = [_][]const u8{ "echo", "hello" };
@@ -286,7 +317,7 @@ test "docker sandbox wrap command prepends docker run" {
 }
 
 test "docker sandbox wrap with custom image" {
-    var dk = createDockerSandbox(std.testing.allocator, "/tmp/workspace", "ubuntu:22.04");
+    var dk = try createDockerSandbox(std.testing.allocator, "/tmp/workspace", "ubuntu:22.04");
     const sb = dk.sandbox();
 
     const argv = [_][]const u8{"ls"};
@@ -300,7 +331,7 @@ test "docker sandbox wrap with custom image" {
 }
 
 test "docker sandbox wrap empty argv" {
-    var dk = createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
+    var dk = try createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
     const sb = dk.sandbox();
 
     const argv = [_][]const u8{};
@@ -312,7 +343,7 @@ test "docker sandbox wrap empty argv" {
 }
 
 test "docker buffer too small returns error" {
-    var dk = createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
+    var dk = try createDockerSandbox(std.testing.allocator, "/tmp/workspace", null);
     const sb = dk.sandbox();
 
     const argv = [_][]const u8{ "echo", "test" };
@@ -322,7 +353,7 @@ test "docker buffer too small returns error" {
 }
 
 test "docker sandbox workspace is mounted correctly" {
-    var dk = createDockerSandbox(std.testing.allocator, "/home/user/myproject", null);
+    var dk = try createDockerSandbox(std.testing.allocator, "/home/user/myproject", null);
     const sb = dk.sandbox();
 
     const argv = [_][]const u8{"bash"};
