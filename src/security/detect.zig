@@ -60,7 +60,11 @@ pub fn createSandbox(
             return storage.noop.sandbox();
         },
         .docker => {
-            storage.docker = .{ .allocator = allocator, .workspace_dir = workspace_dir, .image = DockerSandbox.default_image };
+            storage.docker = @import("docker.zig").createDockerSandbox(allocator, workspace_dir, null) catch {
+                // Workspace path failed validation; fall back to noop.
+                storage.noop = .{};
+                return storage.noop.sandbox();
+            };
             return storage.docker.sandbox();
         },
         .auto => {
@@ -101,7 +105,10 @@ fn detectBest(allocator: std.mem.Allocator, workspace_dir: []const u8, storage: 
     }
 
     // Docker works on any platform if installed
-    storage.docker = .{ .allocator = allocator, .workspace_dir = workspace_dir, .image = DockerSandbox.default_image };
+    storage.docker = @import("docker.zig").createDockerSandbox(allocator, workspace_dir, null) catch {
+        storage.noop = .{};
+        return storage.noop.sandbox();
+    };
     if (storage.docker.sandbox().isAvailable()) {
         return storage.docker.sandbox();
     }
@@ -132,8 +139,10 @@ pub fn detectAvailable(allocator: std.mem.Allocator, workspace_dir: []const u8) 
     storage.bubblewrap = .{ .workspace_dir = workspace_dir };
     const bw_avail = storage.bubblewrap.sandbox().isAvailable();
 
-    storage.docker = .{ .allocator = allocator, .workspace_dir = workspace_dir, .image = DockerSandbox.default_image };
-    const dk_avail = storage.docker.sandbox().isAvailable();
+    const dk_avail = if (@import("docker.zig").createDockerSandbox(allocator, workspace_dir, null)) |dk| blk: {
+        storage.docker = dk;
+        break :blk storage.docker.sandbox().isAvailable();
+    } else |_| false;
 
     return .{
         .landlock = ll_avail,
