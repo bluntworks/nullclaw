@@ -74,6 +74,9 @@ pub const multimodal = @import("multimodal.zig");
 // Phase 4e: Agent Routing
 pub const agent_routing = @import("agent_routing.zig");
 
+// Phase 4f: TUI
+pub const tui = @import("tui/root.zig");
+
 // Phase 5: Hardware & Integrations
 pub const hardware = @import("hardware.zig");
 pub const integrations = @import("integrations.zig");

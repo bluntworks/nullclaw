@@ -24,42 +24,17 @@ const DAEMON_STALE_SECONDS: i64 = 30;
 const SCHEDULER_STALE_SECONDS: i64 = 120;
 const CHANNEL_STALE_SECONDS: i64 = 300;
 const COMMAND_VERSION_PREVIEW_CHARS: usize = 60;
-// ── ANSI color support ──────────────────────────────────────────
+// ── ANSI color support (delegated to tui/style.zig) ─────────────
+
+const tui_style = @import("tui/style.zig");
+pub const shouldColorize = tui_style.shouldColorize;
 
 const Color = struct {
-    const reset = "\x1b[0m";
-    const green = "\x1b[32m";
-    const yellow = "\x1b[33m";
-    const red = "\x1b[31m";
+    const reset = tui_style.ansi.reset;
+    const green = tui_style.ansi.green;
+    const yellow = tui_style.ansi.yellow;
+    const red = tui_style.ansi.red;
 };
-
-pub fn shouldColorize(file: std.fs.File) bool {
-    // Respect NO_COLOR convention (https://no-color.org/)
-    if (comptime builtin.os.tag != .windows) {
-        if (std.posix.getenv("NO_COLOR")) |_| return false;
-    }
-
-    // Never colorize if stdout is redirected to a file/pipe
-    if (!file.isTty()) return false;
-
-    // On Windows, attempt to enable Virtual Terminal Processing.
-    // If that fails, fall back to no color.
-    if (builtin.os.tag == .windows) {
-        return enableWindowsVT100() catch false;
-    }
-
-    return true;
-}
-
-/// Windows-specific: enable ENABLE_VIRTUAL_TERMINAL_PROCESSING on stdout.
-fn enableWindowsVT100() !bool {
-    const windows = std.os.windows;
-    const handle = try windows.GetStdHandle(windows.STD_OUTPUT_HANDLE);
-    var mode: windows.DWORD = 0;
-    if (windows.kernel32.GetConsoleMode(handle, &mode) == 0) return false;
-    mode |= 0x0004; // ENABLE_VIRTUAL_TERMINAL_PROCESSING
-    return windows.kernel32.SetConsoleMode(handle, mode) != 0;
-}
 
 // ── Diagnostic types ────────────────────────────────────────────
 
