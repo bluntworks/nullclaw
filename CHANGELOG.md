@@ -7,6 +7,14 @@ This project uses [CalVer](https://calver.org/) versioning (YYYY.M.D).
 
 ## [Unreleased]
 
+### Added
+
+- `docker-compose.local.yml` for local development builds with SQLite memory and bind-mounted data directory
+
+### Fixed
+
+- Venice provider base URL (`https://api.venice.ai` → `https://api.venice.ai/api/v1`)
+
 ## [2026.3.7]
 
 ### Security

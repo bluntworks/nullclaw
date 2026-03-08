@@ -13,6 +13,7 @@ zig-cache/
 *.bak
 *.a
 reference/
+data/
 
 result
 .direnv/

@@ -70,7 +70,7 @@ const compat_providers = [_]CompatProvider{
     .{ .name = "telnyx", .url = "https://api.telnyx.com/v2/ai", .display = "Telnyx" },
 
     // ── Gateways & Aggregators ────────────────────────────────────────────
-    .{ .name = "venice", .url = "https://api.venice.ai", .display = "Venice" },
+    .{ .name = "venice", .url = "https://api.venice.ai/api/v1", .display = "Venice" },
     .{ .name = "vercel", .url = "https://ai-gateway.vercel.sh/v1", .display = "Vercel AI Gateway" },
     .{ .name = "vercel-ai", .url = "https://ai-gateway.vercel.sh/v1", .display = "Vercel AI Gateway" },
     .{ .name = "together", .url = "https://api.together.xyz", .display = "Together AI" },
@@ -420,7 +420,7 @@ test "classifyProvider new providers" {
 }
 
 test "compatibleProviderUrl returns correct URLs" {
-    try std.testing.expectEqualStrings("https://api.venice.ai", compatibleProviderUrl("venice").?);
+    try std.testing.expectEqualStrings("https://api.venice.ai/api/v1", compatibleProviderUrl("venice").?);
     try std.testing.expectEqualStrings("https://api.groq.com/openai/v1", compatibleProviderUrl("groq").?);
     try std.testing.expectEqualStrings("https://api.deepseek.com", compatibleProviderUrl("deepseek").?);
     try std.testing.expectEqualStrings("https://api.poe.com/v1", compatibleProviderUrl("poe").?);

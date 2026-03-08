@@ -1,0 +1,46 @@
+# Local development compose — builds from source, SQLite memory
+# Usage:
+#   docker compose -f docker-compose.local.yml --profile gateway up --build
+#   docker compose -f docker-compose.local.yml --profile agent up --build
+#
+# Config: data/.nullclaw/config.json (bind-mounted into container)
+# SQLite DB: data/workspace/memory.db (inspectable from host)
+# API keys: .env file (see .env.example)
+
+services:
+  agent:
+    build:
+      context: .
+      target: release-root
+    image: nullclaw:local
+    pull_policy: never
+    profiles: ["agent"]
+    stdin_open: true
+    tty: true
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/nullclaw-data
+    restart: "no"
+
+  gateway:
+    build:
+      context: .
+      target: release-root
+    image: nullclaw:local
+    pull_policy: never
+    profiles: ["gateway"]
+    ports:
+      - "3333:3000"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      - ./data:/nullclaw-data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

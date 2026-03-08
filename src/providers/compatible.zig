@@ -1431,7 +1431,7 @@ test "AuthStyle headerName" {
 }
 
 test "provider getName returns custom name" {
-    var p = OpenAiCompatibleProvider.init(std.testing.allocator, "Venice", "https://api.venice.ai", "key", .bearer, null);
+    var p = OpenAiCompatibleProvider.init(std.testing.allocator, "Venice", "https://api.venice.ai/api/v1", "key", .bearer, null);
     const prov = p.provider();
     try std.testing.expectEqualStrings("Venice", prov.getName());
 }
