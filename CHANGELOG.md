@@ -21,6 +21,7 @@ This project uses [CalVer](https://calver.org/) versioning (YYYY.M.D).
 
 ### Fixed
 
+- Tool call arguments not displaying in grey in CLI and TUI streaming output (`tag_body` buffer too small)
 - Venice provider base URL (`https://api.venice.ai` → `https://api.venice.ai/api/v1`)
 
 ## [2026.3.7]

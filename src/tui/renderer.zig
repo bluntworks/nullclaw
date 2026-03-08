@@ -26,6 +26,7 @@ const ScrollLine = struct {
     buf: [MAX_LINE_CHARS]u8 = undefined,
     len: u16 = 0,
     is_user: bool = false,
+    is_raw: bool = false,
 
     fn text(self: *const ScrollLine) []const u8 {
         return self.buf[0..self.len];
@@ -152,6 +153,7 @@ pub const Renderer = struct {
                     display_lines[display_count] = .{
                         .text = text,
                         .is_user = line.is_user,
+                        .is_raw = line.is_raw,
                     };
                     display_count += 1;
                 }
@@ -166,7 +168,7 @@ pub const Renderer = struct {
         while (di > 0) {
             di -= 1;
             const dl = display_lines[di];
-            row = try self.renderWrappedLine(row, dl.text, dl.is_user, cols);
+            row = try self.renderWrappedLine(row, dl.text, dl.is_user, dl.is_raw, cols);
         }
 
         // Clear remaining chat rows
@@ -180,10 +182,24 @@ pub const Renderer = struct {
     const DisplayLine = struct {
         text: []const u8,
         is_user: bool,
+        is_raw: bool = false,
     };
 
-    fn renderWrappedLine(self: *Renderer, start_row: u16, text: []const u8, is_user: bool, cols: usize) !u16 {
+    fn renderWrappedLine(self: *Renderer, start_row: u16, text: []const u8, is_user: bool, is_raw: bool, cols: usize) !u16 {
         if (cols == 0) return start_row;
+
+        // Raw lines: write verbatim (text already contains ANSI escapes)
+        if (is_raw) {
+            try self.term.moveTo(start_row, 0);
+            try self.term.clearLine();
+            var out_buf2: [4096]u8 = undefined;
+            var bw2 = self.term.file.writer(&out_buf2);
+            const w2 = &bw2.interface;
+            try w2.writeAll(text);
+            try w2.flush();
+            return start_row + 1;
+        }
+
         var row = start_row;
         var pos: usize = 0;
 
@@ -253,6 +269,18 @@ pub const Renderer = struct {
         self.lines[self.write_pos] = .{
             .len = copy_len,
             .is_user = is_user,
+        };
+        @memcpy(self.lines[self.write_pos].buf[0..copy_len], text[0..copy_len]);
+        self.write_pos = (self.write_pos + 1) % MAX_SCROLLBACK;
+        if (self.line_count < MAX_SCROLLBACK) self.line_count += 1;
+    }
+
+    /// Append a raw line (pre-styled with ANSI escapes, rendered verbatim).
+    pub fn appendRawLine(self: *Renderer, text: []const u8) void {
+        const copy_len: u16 = @intCast(@min(text.len, MAX_LINE_CHARS));
+        self.lines[self.write_pos] = .{
+            .len = copy_len,
+            .is_raw = true,
         };
         @memcpy(self.lines[self.write_pos].buf[0..copy_len], text[0..copy_len]);
         self.write_pos = (self.write_pos + 1) % MAX_SCROLLBACK;

@@ -2280,6 +2280,7 @@ pub const TelegramChannel = struct {
                     try vtableSend(ptr, target, message, &.{});
                 }
             },
+            .tool_call => {},
         }
     }
 

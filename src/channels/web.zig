@@ -1253,6 +1253,7 @@ pub const WebChannel = struct {
         const event_type = switch (stage) {
             .chunk => "assistant_chunk",
             .final => "assistant_final",
+            .tool_call => "tool_call",
         };
 
         try w.writeAll("{\"v\":1,\"type\":");

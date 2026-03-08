@@ -3,6 +3,7 @@ const providers = @import("providers/root.zig");
 pub const OutboundStage = enum {
     chunk,
     final,
+    tool_call,
 };
 
 pub const Event = struct {
@@ -56,6 +57,11 @@ pub const TagFilter = struct {
     state: State = .passthrough,
     buf: [max_buf_len]u8 = undefined,
     buf_len: u8 = 0,
+    tag_body: [4096]u8 = undefined,
+    tag_body_len: u16 = 0,
+    tag_type: TagType = .none,
+
+    const TagType = enum { none, tool_call, tool_result };
 
     const State = enum {
         passthrough,
@@ -162,6 +168,12 @@ pub const TagFilter = struct {
                     if (self.buf_len > 1 and (b == '>' or b == ' ') and
                         matchesAnyPrefix(prefix[0 .. self.buf_len - 1], &open_prefixes))
                     {
+                        // Determine which tag type we matched
+                        self.tag_type = if (std.mem.eql(u8, prefix[0 .. self.buf_len - 1], "<tool_call"))
+                            .tool_call
+                        else
+                            .tool_result;
+                        self.tag_body_len = 0;
                         self.buf_len = 0;
                         if (b == '>') {
                             self.state = .inside_tag;
@@ -190,7 +202,15 @@ pub const TagFilter = struct {
                 },
                 .inside_tag => {
                     clean_start = i + 1;
+                    // Buffer body content (silently drop excess)
+                    if (self.tag_body_len < 4096) {
+                        self.tag_body[self.tag_body_len] = b;
+                        self.tag_body_len += 1;
+                    }
                     if (b == '<') {
+                        // The '<' we just buffered is part of close tag candidate,
+                        // remove it from body since it's not content.
+                        self.tag_body_len -= 1;
                         self.buf[0] = b;
                         self.buf_len = 1;
                         self.state = .maybe_close;
@@ -201,15 +221,33 @@ pub const TagFilter = struct {
                     self.buf[self.buf_len] = b;
                     self.buf_len += 1;
                     const prefix = self.buf[0..self.buf_len];
-                    if (matchesAny(prefix, &close_tags)) |_| {
-                        // Complete close tag matched — back to passthrough.
+                    if (matchesAny(prefix, &close_tags)) |tag_idx| {
+                        // Complete close tag matched.
+                        if (tag_idx == 0 and self.tag_type == .tool_call) {
+                            // Emit full body so callbacks can format name + args.
+                            self.inner.emit(.{
+                                .stage = .tool_call,
+                                .text = self.tag_body[0..self.tag_body_len],
+                            });
+                        }
+                        // Reset state (tool_result silently discarded).
+                        self.tag_type = .none;
+                        self.tag_body_len = 0;
                         self.buf_len = 0;
                         self.state = .passthrough;
                         clean_start = i + 1;
                         continue;
                     }
                     if (!prefixOfAny(prefix, &close_tags) or self.buf_len >= max_tag_len) {
-                        // Not a close tag — stay inside, discard buffer.
+                        // Not a close tag — stay inside. Re-buffer the failed
+                        // candidate bytes into tag_body (they are real content).
+                        const failed = self.buf[0..self.buf_len];
+                        for (failed) |fb| {
+                            if (self.tag_body_len < 4096) {
+                                self.tag_body[self.tag_body_len] = fb;
+                                self.tag_body_len += 1;
+                            }
+                        }
                         self.buf_len = 0;
                         self.state = .inside_tag;
                         continue;
@@ -230,6 +268,47 @@ pub const TagFilter = struct {
         }
         self.buf_len = 0;
         self.state = .passthrough;
+    }
+
+    /// Extract tool name from tag body JSON via simple substring search.
+    /// Looks for `"name":"<value>"` or `"name": "<value>"` patterns.
+    pub fn extractToolName(body: []const u8) []const u8 {
+        const needle = "\"name\":";
+        const pos = std.mem.indexOf(u8, body, needle) orelse return "unknown";
+        var start = pos + needle.len;
+        // Skip optional whitespace
+        while (start < body.len and body[start] == ' ') start += 1;
+        // Expect opening quote
+        if (start >= body.len or body[start] != '"') return "unknown";
+        start += 1;
+        const end = std.mem.indexOfScalarPos(u8, body, start, '"') orelse return "unknown";
+        return body[start..end];
+    }
+
+    /// Extracts the arguments value from a tool_call JSON body.
+    /// Returns the raw value after `"arguments":` (object, string, etc.) or empty.
+    pub fn extractToolArgs(body: []const u8) []const u8 {
+        const needle = "\"arguments\":";
+        const pos = std.mem.indexOf(u8, body, needle) orelse return "";
+        var start = pos + needle.len;
+        while (start < body.len and body[start] == ' ') start += 1;
+        if (start >= body.len) return "";
+        // Find the matching end — for objects, find balanced braces.
+        if (body[start] == '{') {
+            var depth: usize = 0;
+            var i = start;
+            while (i < body.len) : (i += 1) {
+                if (body[i] == '{') depth += 1;
+                if (body[i] == '}') {
+                    depth -= 1;
+                    if (depth == 0) return body[start .. i + 1];
+                }
+            }
+        }
+        // Fallback: return everything from start to end of body (trim trailing }).
+        var end = body.len;
+        while (end > start and (body[end - 1] == '}' or body[end - 1] == ' ')) end -= 1;
+        return body[start..end];
     }
 
     /// Returns the index if `text` exactly matches any entry in `tags`.
@@ -269,11 +348,20 @@ fn collectChunks(comptime max: usize) type {
         chunks: [max][]const u8 = undefined,
         count: usize = 0,
         got_final: bool = false,
+        tool_call_names: [8][]const u8 = undefined,
+        tool_call_count: usize = 0,
 
         fn callback(ctx: *anyopaque, event: Event) void {
             const self: *@This() = @ptrCast(@alignCast(ctx));
             if (event.stage == .final) {
                 self.got_final = true;
+                return;
+            }
+            if (event.stage == .tool_call) {
+                if (self.tool_call_count < 8) {
+                    self.tool_call_names[self.tool_call_count] = event.text;
+                    self.tool_call_count += 1;
+                }
                 return;
             }
             if (self.count < max) {
@@ -446,4 +534,64 @@ test "TagFilter strips section wrapper with mixed pipe-delimited close tag" {
     s.emitFinal();
     var buf: [96]u8 = undefined;
     try std.testing.expectEqualStrings("AB", col.joined(&buf));
+}
+
+test "TagFilter emits tool_call event with correct name" {
+    var col = collectChunks(16){};
+    var filter = TagFilter.init(col.sink());
+    const s = filter.sink();
+    s.emitChunk("Hi <tool_call>{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}</tool_call> bye");
+    s.emitFinal();
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("Hi  bye", col.joined(&buf));
+    try std.testing.expectEqual(@as(usize, 1), col.tool_call_count);
+    try std.testing.expectEqualStrings("{\"name\":\"shell\",\"arguments\":{\"cmd\":\"ls\"}}", col.tool_call_names[0]);
+}
+
+test "TagFilter tool_result still stripped silently" {
+    var col = collectChunks(16){};
+    var filter = TagFilter.init(col.sink());
+    const s = filter.sink();
+    s.emitChunk("A<tool_result>output</tool_result>B");
+    s.emitFinal();
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("AB", col.joined(&buf));
+    try std.testing.expectEqual(@as(usize, 0), col.tool_call_count);
+}
+
+test "TagFilter tool_call name extraction from split chunks" {
+    var col = collectChunks(16){};
+    var filter = TagFilter.init(col.sink());
+    const s = filter.sink();
+    s.emitChunk("<tool_c");
+    s.emitChunk("all>{\"name\":");
+    s.emitChunk("\"web_search\",\"arguments\":{}}</tool_call>");
+    s.emitFinal();
+    try std.testing.expectEqual(@as(usize, 1), col.tool_call_count);
+    try std.testing.expectEqualStrings("{\"name\":\"web_search\",\"arguments\":{}}", col.tool_call_names[0]);
+}
+
+test "TagFilter extractToolName with spaces" {
+    const name = TagFilter.extractToolName("{\"name\": \"read_file\", \"arguments\": {}}");
+    try std.testing.expectEqualStrings("read_file", name);
+}
+
+test "TagFilter extractToolName returns unknown for missing name" {
+    const name = TagFilter.extractToolName("{\"arguments\": {}}");
+    try std.testing.expectEqualStrings("unknown", name);
+}
+
+test "TagFilter extractToolArgs extracts arguments object" {
+    const args = TagFilter.extractToolArgs("{\"name\": \"read_file\", \"arguments\": {\"path\": \"/tmp/foo\"}}");
+    try std.testing.expectEqualStrings("{\"path\": \"/tmp/foo\"}", args);
+}
+
+test "TagFilter extractToolArgs returns empty for missing arguments" {
+    const args = TagFilter.extractToolArgs("{\"name\": \"read_file\"}");
+    try std.testing.expectEqualStrings("", args);
+}
+
+test "TagFilter extractToolArgs handles empty object" {
+    const args = TagFilter.extractToolArgs("{\"name\": \"ls\", \"arguments\": {}}");
+    try std.testing.expectEqualStrings("{}", args);
 }

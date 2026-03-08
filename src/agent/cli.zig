@@ -34,6 +34,18 @@ const CliStreamCtx = struct {
 };
 
 fn cliStreamSinkCallback(_: *anyopaque, event: streaming.Event) void {
+    if (event.stage == .tool_call) {
+        const name = streaming.TagFilter.extractToolName(event.text);
+        const args = streaming.TagFilter.extractToolArgs(event.text);
+        var buf: [8192]u8 = undefined;
+        var bw = std.fs.File.stdout().writer(&buf);
+        const wr = &bw.interface;
+        wr.print("\n\x1b[44;30m {s} \x1b[0m", .{name}) catch {};
+        if (args.len > 0) wr.print(" \x1b[90m{s}\x1b[0m", .{args}) catch {};
+        wr.print("\n\n", .{}) catch {};
+        wr.flush() catch {};
+        return;
+    }
     if (event.stage != .chunk or event.text.len == 0) return;
     var buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&buf);
@@ -57,6 +69,19 @@ const TuiStreamCtx = struct {
 
 fn tuiStreamSinkCallback(ctx: *anyopaque, event: streaming.Event) void {
     const r: *tui_mod.Renderer = @ptrCast(@alignCast(ctx));
+    if (event.stage == .tool_call) {
+        const name = streaming.TagFilter.extractToolName(event.text);
+        const args = streaming.TagFilter.extractToolArgs(event.text);
+        var fmt_buf: [4096]u8 = undefined;
+        const formatted = if (args.len > 0)
+            std.fmt.bufPrint(&fmt_buf, "\x1b[44;30m {s} \x1b[0m \x1b[90m{s}\x1b[0m", .{ name, args }) catch return
+        else
+            std.fmt.bufPrint(&fmt_buf, "\x1b[44;30m {s} \x1b[0m", .{name}) catch return;
+        r.appendRawLine(formatted);
+        r.appendLine("", false);
+        r.draw() catch {};
+        return;
+    }
     if (event.stage == .chunk and event.text.len > 0) {
         r.appendStreamChunk(event.text);
         r.draw() catch {};
@@ -337,11 +362,12 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         // Enable streaming if provider supports it
         var stream_sink_ctx: u8 = 0;
+        var tag_filter = streaming.TagFilter.init(.{
+            .callback = cliStreamSinkCallback,
+            .ctx = @ptrCast(&stream_sink_ctx),
+        });
         var stream_ctx = CliStreamCtx{
-            .sink = .{
-                .callback = cliStreamSinkCallback,
-                .ctx = @ptrCast(&stream_sink_ctx),
-            },
+            .sink = tag_filter.sink(),
         };
         if (supports_streaming) {
             agent.stream_callback = cliStreamCallback;
@@ -448,11 +474,12 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     // Enable streaming if provider supports it
     var stream_sink_ctx: u8 = 0;
+    var tag_filter = streaming.TagFilter.init(.{
+        .callback = cliStreamSinkCallback,
+        .ctx = @ptrCast(&stream_sink_ctx),
+    });
     var stream_ctx = CliStreamCtx{
-        .sink = .{
-            .callback = cliStreamSinkCallback,
-            .ctx = @ptrCast(&stream_sink_ctx),
-        },
+        .sink = tag_filter.sink(),
     };
     if (supports_streaming) {
         agent.stream_callback = cliStreamCallback;
@@ -581,13 +608,14 @@ fn runTui(
     }
     defer agent.deinit();
 
-    // Set up streaming
+    // Set up streaming (TagFilter strips <tool_call>/<tool_result> XML)
+    var tag_filter = streaming.TagFilter.init(.{
+        .callback = tuiStreamSinkCallback,
+        .ctx = @ptrCast(&renderer),
+    });
     var stream_ctx = TuiStreamCtx{
         .renderer = &renderer,
-        .sink = .{
-            .callback = tuiStreamSinkCallback,
-            .ctx = @ptrCast(&renderer),
-        },
+        .sink = tag_filter.sink(),
     };
     if (supports_streaming) {
         agent.stream_callback = tuiStreamCallback;

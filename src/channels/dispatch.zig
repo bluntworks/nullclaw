@@ -388,6 +388,7 @@ const MockChannel = struct {
         switch (stage) {
             .chunk => _ = self.chunk_count.fetchAdd(1, .monotonic),
             .final => _ = self.sent_count.fetchAdd(1, .monotonic),
+            .tool_call => {},
         }
     }
     fn mockName(ctx: *anyopaque) []const u8 {
