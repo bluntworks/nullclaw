@@ -16,6 +16,7 @@
 //! 3) Optional fallback chain (`http_request.search_fallback_providers`).
 
 const std = @import("std");
+const log = std.log.scoped(.web_search);
 const root = @import("root.zig");
 const platform = @import("../platform.zig");
 const search_providers = @import("web_search_providers/root.zig");
@@ -97,6 +98,7 @@ pub const WebSearchTool = struct {
                     return ToolResult.fail("Invalid http_request.search_base_url; expected https://host[/search]");
                 }
 
+                log.warn("{s} failed: {s}", .{ providerName(provider), @errorName(err) });
                 if (failures.items.len > 0) {
                     try failures.appendSlice(allocator, " | ");
                 }
@@ -110,6 +112,7 @@ pub const WebSearchTool = struct {
             return ToolResult.fail("web_search has no providers configured.");
         }
 
+        log.warn("all providers failed: {s}", .{failures.items});
         const msg = try std.fmt.allocPrint(allocator, "All web_search providers failed: {s}", .{failures.items});
         return ToolResult{ .success = false, .output = "", .error_msg = msg };
     }

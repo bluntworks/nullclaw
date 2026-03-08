@@ -9,6 +9,8 @@ This project uses [CalVer](https://calver.org/) versioning (YYYY.M.D).
 
 ### Added
 
+- **TUI log panel**: 3-line diagnostic panel at the bottom of TUI mode showing tool calls, errors, and provider failures in dim grey text (50-entry ring buffer, resize-aware)
+- **web_search scoped logging**: `std.log.scoped(.web_search)` warnings on individual provider failures and all-providers-failed (stderr, for non-TUI modes)
 - **TUI mode** for the agent REPL (`nullclaw agent --tui`): full-screen terminal interface with alt screen, status bar, scrollback chat area, and styled output — built from scratch using ANSI escape codes with zero external dependencies
   - Line editor with cursor movement (arrows, Home/End), history navigation (Up/Down), and emacs-style key bindings (Ctrl+A/E/K/U/W)
   - Streaming display: LLM response chunks render in real-time into the chat area

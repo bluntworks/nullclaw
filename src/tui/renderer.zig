@@ -1,10 +1,11 @@
 //! Screen layout and rendering for the TUI agent REPL.
 //!
 //! Layout (top to bottom):
-//!   Row 0           — Status bar (model, provider, tokens)
-//!   Rows 1..H-3     — Chat area (scrollback ring buffer)
-//!   Row H-2         — Separator line
-//!   Row H-1         — Input line (managed by LineEditor)
+//!   Row 0              — Status bar (model, provider, tokens)
+//!   Rows 1..H-6        — Chat area (scrollback ring buffer)
+//!   Row H-5            — Separator line (chat/log boundary)
+//!   Rows H-4..H-2      — Log panel (3 lines, dim text)
+//!   Row H-1            — Input line (managed by LineEditor)
 //!
 //! The chat area uses a pre-allocated ring buffer (~1000 lines) for
 //! scrollback. Word wrapping is performed at render time based on
@@ -20,6 +21,10 @@ const Style = style_mod.Style;
 const MAX_SCROLLBACK = 1000;
 /// Maximum characters per logical line.
 const MAX_LINE_CHARS = 512;
+/// Number of rows reserved for the log panel.
+const LOG_PANEL_HEIGHT: u16 = 3;
+/// Maximum number of log entries in the ring buffer.
+const LOG_SCROLLBACK = 50;
 
 /// A single line in the scrollback buffer.
 const ScrollLine = struct {
@@ -41,6 +46,11 @@ pub const Renderer = struct {
     lines: [MAX_SCROLLBACK]ScrollLine = [_]ScrollLine{.{}} ** MAX_SCROLLBACK,
     line_count: usize = 0,
     write_pos: usize = 0, // next write position in ring
+
+    // Log panel ring buffer
+    log_lines: [LOG_SCROLLBACK]ScrollLine = [_]ScrollLine{.{}} ** LOG_SCROLLBACK,
+    log_count: usize = 0,
+    log_write_pos: usize = 0,
 
     // Status bar content
     provider_name: [64]u8 = undefined,
@@ -89,6 +99,7 @@ pub const Renderer = struct {
         try self.drawStatusBar();
         try self.drawChatArea();
         try self.drawSeparator();
+        try self.drawLogPanel();
         try self.term.showCursor();
     }
 
@@ -123,10 +134,19 @@ pub const Renderer = struct {
         try w.flush();
     }
 
-    /// Draw the chat area (rows 1 to height-3).
+    /// Row where the separator between chat and log panel sits.
+    fn separatorRow(self: *Renderer) u16 {
+        // H - 2 - LOG_PANEL_HEIGHT - 1 = H - 2 - 3 - 1 = H - 6
+        // but guard against tiny terminals
+        if (self.size.rows < 2 + LOG_PANEL_HEIGHT + 2) return 1;
+        return self.size.rows - 1 - LOG_PANEL_HEIGHT - 1;
+    }
+
+    /// Draw the chat area (rows 1 to separatorRow-1).
     fn drawChatArea(self: *Renderer) !void {
-        if (self.size.rows < 5) return;
-        const chat_rows: usize = @as(usize, self.size.rows) - 3;
+        if (self.size.rows < 2 + LOG_PANEL_HEIGHT + 3) return;
+        const sep = self.separatorRow();
+        const chat_rows: usize = @as(usize, sep) - 1; // rows 1..sep-1
         const cols: usize = @as(usize, self.size.cols);
 
         // Collect visible wrapped lines from scrollback
@@ -171,8 +191,8 @@ pub const Renderer = struct {
             row = try self.renderWrappedLine(row, dl.text, dl.is_user, dl.is_raw, cols);
         }
 
-        // Clear remaining chat rows
-        while (row < self.size.rows - 2) {
+        // Clear remaining chat rows up to the separator
+        while (row < sep) {
             try self.term.moveTo(row, 0);
             try self.term.clearLine();
             row += 1;
@@ -244,10 +264,10 @@ pub const Renderer = struct {
         return row;
     }
 
-    /// Draw separator at row height-2.
+    /// Draw separator between chat area and log panel.
     fn drawSeparator(self: *Renderer) !void {
-        if (self.size.rows < 3) return;
-        const sep_row = self.size.rows - 2;
+        if (self.size.rows < 2 + LOG_PANEL_HEIGHT + 2) return;
+        const sep_row = self.separatorRow();
         try self.term.moveTo(sep_row, 0);
         try self.term.clearLine();
 
@@ -261,6 +281,66 @@ pub const Renderer = struct {
         }
         try w.writeAll("\x1b[0m");
         try w.flush();
+    }
+
+    /// Draw the log panel (LOG_PANEL_HEIGHT rows above the input line).
+    fn drawLogPanel(self: *Renderer) !void {
+        if (self.size.rows < 2 + LOG_PANEL_HEIGHT + 2) return;
+        const start_row = self.size.rows - 1 - LOG_PANEL_HEIGHT;
+        const cols: usize = @as(usize, self.size.cols);
+
+        // Determine which log lines to show (most recent LOG_PANEL_HEIGHT)
+        const show_count = @min(self.log_count, LOG_PANEL_HEIGHT);
+
+        var row = start_row;
+        // Render blank rows first if we have fewer log lines than panel height
+        const blank_rows = LOG_PANEL_HEIGHT - @as(u16, @intCast(show_count));
+        for (0..blank_rows) |_| {
+            try self.term.moveTo(row, 0);
+            try self.term.clearLine();
+            row += 1;
+        }
+
+        // Render the most recent log lines
+        if (show_count > 0) {
+            var i: usize = show_count;
+            while (i > 0) {
+                i -= 1;
+                const ring_idx = if (self.log_count <= LOG_SCROLLBACK)
+                    self.log_count - show_count + (show_count - 1 - i)
+                else
+                    (self.log_write_pos + LOG_SCROLLBACK - show_count + (show_count - 1 - i)) % LOG_SCROLLBACK;
+
+                const line = &self.log_lines[ring_idx];
+                const text = line.text();
+
+                try self.term.moveTo(row, 0);
+                try self.term.clearLine();
+
+                var out_buf: [4096]u8 = undefined;
+                var bw = self.term.file.writer(&out_buf);
+                const w = &bw.interface;
+                // Dim style (ANSI dim + grey 242)
+                try w.writeAll("\x1b[2;38;5;242m");
+                const truncated = text[0..@min(text.len, cols)];
+                try w.writeAll(truncated);
+                try w.writeAll("\x1b[0m");
+                try w.flush();
+
+                row += 1;
+            }
+        }
+    }
+
+    /// Append a line to the log panel ring buffer.
+    pub fn appendLog(self: *Renderer, text: []const u8) void {
+        const copy_len: u16 = @intCast(@min(text.len, MAX_LINE_CHARS));
+        self.log_lines[self.log_write_pos] = .{
+            .len = copy_len,
+        };
+        @memcpy(self.log_lines[self.log_write_pos].buf[0..copy_len], text[0..copy_len]);
+        self.log_write_pos = (self.log_write_pos + 1) % LOG_SCROLLBACK;
+        if (self.log_count < LOG_SCROLLBACK) self.log_count += 1;
     }
 
     /// Append a line to the scrollback buffer.
@@ -490,4 +570,39 @@ test "ScrollLine.text returns correct slice" {
     sl.buf[1] = 'i';
     sl.len = 2;
     try std.testing.expectEqualStrings("hi", sl.text());
+}
+
+test "Renderer.appendLog basic" {
+    var term = Terminal.init();
+    var r = Renderer.init(&term);
+    r.appendLog("tool failed: timeout");
+    try std.testing.expectEqual(@as(usize, 1), r.log_count);
+    try std.testing.expectEqualStrings("tool failed: timeout", r.log_lines[0].text());
+}
+
+test "Renderer.appendLog ring wraps" {
+    var term = Terminal.init();
+    var r = Renderer.init(&term);
+    for (0..LOG_SCROLLBACK + 5) |i| {
+        var buf: [32]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "log-{d}", .{i}) catch unreachable;
+        r.appendLog(text);
+    }
+    try std.testing.expectEqual(@as(usize, LOG_SCROLLBACK), r.log_count);
+}
+
+test "Renderer.separatorRow accounts for log panel" {
+    var term = Terminal.init();
+    var r = Renderer.init(&term);
+    r.size = .{ .cols = 80, .rows = 24 };
+    // separator = H - 1 - LOG_PANEL_HEIGHT - 1 = 24 - 1 - 3 - 1 = 19
+    try std.testing.expectEqual(@as(u16, 19), r.separatorRow());
+}
+
+test "Renderer.separatorRow guards tiny terminal" {
+    var term = Terminal.init();
+    var r = Renderer.init(&term);
+    r.size = .{ .cols = 80, .rows = 5 };
+    // Too small: returns 1
+    try std.testing.expectEqual(@as(u16, 1), r.separatorRow());
 }

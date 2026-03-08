@@ -79,6 +79,15 @@ fn tuiStreamSinkCallback(ctx: *anyopaque, event: streaming.Event) void {
             std.fmt.bufPrint(&fmt_buf, "\x1b[44;30m {s} \x1b[0m", .{name}) catch return;
         r.appendRawLine(formatted);
         r.appendLine("", false);
+
+        // Log tool calls to the log panel
+        var log_buf: [256]u8 = undefined;
+        const log_msg = if (args.len > 0)
+            std.fmt.bufPrint(&log_buf, "[tool] {s} {s}", .{ name, args[0..@min(args.len, 128)] }) catch name
+        else
+            std.fmt.bufPrint(&log_buf, "[tool] {s}", .{name}) catch name;
+        r.appendLog(log_msg);
+
         r.draw() catch {};
         return;
     }
@@ -689,6 +698,7 @@ fn runTui(
                 var err_buf: [256]u8 = undefined;
                 const err_msg = std.fmt.bufPrint(&err_buf, "Error: {}", .{err}) catch "Error";
                 renderer.appendLine(err_msg, false);
+                renderer.appendLog(err_msg);
                 try renderer.draw();
                 try line_editor.render(&terminal);
                 continue;
