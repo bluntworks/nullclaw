@@ -4,20 +4,25 @@ const root = @import("root.zig");
 const Tool = root.Tool;
 const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
+const browser_session_mod = @import("../browser_session.zig");
+const BrowserSessionManager = browser_session_mod.BrowserSessionManager;
+const config_types = @import("../config_types.zig");
+const net_security = @import("../net_security.zig");
+const policy_mod = @import("../security/policy.zig");
 
-/// Maximum response body size for the "read" action (8 KB).
-const MAX_READ_BYTES: usize = 8192;
-/// Maximum raw fetch size passed to curl (64 KB, then truncated to MAX_READ_BYTES).
-const MAX_FETCH_BYTES: usize = 65536;
-
-/// Browser tool — opens URLs in the system browser and fetches page content.
-/// Supports "open" (launch URL), "read" (fetch body via curl), and returns
-/// informative errors for CDP-only actions (click, type, scroll, screenshot).
+/// Browser tool — browse web pages via Chrome DevTools Protocol.
+/// Supports navigate, click, type, read, screenshot, scroll, wait,
+/// run_js, back, and close actions.
 pub const BrowserTool = struct {
+    session_manager: *BrowserSessionManager,
+    config: *const config_types.BrowserConfig,
+    autonomy: policy_mod.AutonomyLevel = .supervised,
+    workspace_dir: []const u8 = ".",
+
     pub const tool_name = "browser";
-    pub const tool_description = "Browse web pages. Actions: open, screenshot, click, type, scroll, read.";
+    pub const tool_description = "Browse web pages via headless Chrome. Actions: navigate, click, type, read, screenshot, scroll, wait, run_js, back, close.";
     pub const tool_params =
-        \\{"type":"object","properties":{"action":{"type":"string","enum":["open","screenshot","click","type","scroll","read"],"description":"Browser action to perform"},"url":{"type":"string","description":"URL to open"},"selector":{"type":"string","description":"CSS selector for click/type"},"text":{"type":"string","description":"Text to type"}},"required":["action"]}
+        \\{"type":"object","properties":{"action":{"type":"string","enum":["open","navigate","click","type","read","screenshot","scroll","wait","run_js","back","close"],"description":"Browser action to perform"},"url":{"type":"string","description":"URL to navigate to"},"selector":{"type":"string","description":"CSS selector or text for click/type/wait"},"text":{"type":"string","description":"Text to type into element"},"direction":{"type":"string","enum":["up","down","left","right"],"description":"Scroll direction"},"amount":{"type":"integer","description":"Scroll amount in pixels (default 300)"},"expression":{"type":"string","description":"JavaScript expression for run_js"},"timeout_ms":{"type":"integer","description":"Timeout in ms for wait (default 5000)"},"session":{"type":"string","description":"Named session (default: default)"}},"required":["action"]}
     ;
 
     const vtable = root.ToolVTable(@This());
@@ -29,171 +34,175 @@ pub const BrowserTool = struct {
         };
     }
 
-    pub fn execute(_: *BrowserTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    pub fn execute(self: *BrowserTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const action = root.getString(args, "action") orelse
             return ToolResult.fail("Missing 'action' parameter");
 
-        if (std.mem.eql(u8, action, "open")) {
-            return executeOpen(allocator, args);
-        } else if (std.mem.eql(u8, action, "read")) {
-            return executeRead(allocator, args);
-        } else if (std.mem.eql(u8, action, "screenshot")) {
-            return ToolResult.fail("Use the screenshot tool instead");
-        } else if (std.mem.eql(u8, action, "click") or
-            std.mem.eql(u8, action, "type") or
-            std.mem.eql(u8, action, "scroll"))
-        {
-            const msg = try std.fmt.allocPrint(
-                allocator,
-                "Browser action '{s}' requires CDP (Chrome DevTools Protocol) which is not available. Use 'open' to launch in system browser or 'read' to fetch page content.",
-                .{action},
-            );
-            return ToolResult{ .success = false, .output = "", .error_msg = msg };
+        // "open" is an alias for "navigate" (backward compat)
+        const effective_action = if (std.mem.eql(u8, action, "open")) "navigate" else action;
+
+        if (std.mem.eql(u8, effective_action, "navigate")) {
+            return self.executeNavigate(allocator, args);
+        } else if (std.mem.eql(u8, effective_action, "click")) {
+            return self.executeCdpAction(allocator, args, .click);
+        } else if (std.mem.eql(u8, effective_action, "type")) {
+            return self.executeCdpAction(allocator, args, .type_text);
+        } else if (std.mem.eql(u8, effective_action, "read")) {
+            return self.executeCdpAction(allocator, args, .read);
+        } else if (std.mem.eql(u8, effective_action, "screenshot")) {
+            return self.executeCdpAction(allocator, args, .screenshot);
+        } else if (std.mem.eql(u8, effective_action, "scroll")) {
+            return self.executeCdpAction(allocator, args, .scroll);
+        } else if (std.mem.eql(u8, effective_action, "wait")) {
+            return self.executeCdpAction(allocator, args, .wait);
+        } else if (std.mem.eql(u8, effective_action, "run_js")) {
+            return self.executeCdpAction(allocator, args, .run_js);
+        } else if (std.mem.eql(u8, effective_action, "back")) {
+            return self.executeCdpAction(allocator, args, .back);
+        } else if (std.mem.eql(u8, effective_action, "close")) {
+            const session_name = root.getString(args, "session") orelse "default";
+            self.session_manager.closeSession(session_name);
+            return ToolResult.ok("Session closed");
         } else {
             const msg = try std.fmt.allocPrint(allocator, "Unknown browser action '{s}'", .{action});
             return ToolResult{ .success = false, .output = "", .error_msg = msg };
         }
     }
 
-    /// "open" — launch URL in the platform's default browser.
-    fn executeOpen(allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
+    /// Navigate action with SSRF protection.
+    fn executeNavigate(self: *BrowserTool, allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
         const url = root.getString(args, "url") orelse
-            return ToolResult.fail("Missing 'url' parameter for open action");
+            return ToolResult.fail("Missing 'url' parameter for navigate action");
 
-        if (!std.mem.startsWith(u8, url, "https://")) {
-            return ToolResult.fail("Only https:// URLs are supported for security");
+        // SSRF protection (skip if yolo)
+        if (self.autonomy != .yolo) {
+            const host = net_security.extractHost(url) orelse
+                return ToolResult.fail("Invalid URL: cannot extract host");
+
+            if (net_security.isLocalHost(host))
+                return ToolResult.fail("Blocked: localhost URLs are not allowed (set autonomy.level=yolo to override)");
+
+            if (!net_security.hostMatchesAllowlist(host, self.config.allowed_domains))
+                return ToolResult.fail("Blocked: host not in allowed_domains list");
+
+            // Require HTTPS unless yolo
+            if (!std.mem.startsWith(u8, url, "https://"))
+                return ToolResult.fail("Only https:// URLs are allowed (set autonomy.level=yolo to override)");
         }
 
-        // On Windows cmd.exe /c start interprets shell metacharacters in the URL.
-        // On Unix, open/xdg-open receives the URL as a separate argv element (execvp),
-        // so metacharacters like & (query params) and % (percent-encoding) are safe.
-        if (comptime builtin.os.tag == .windows) {
-            for (url) |c| {
-                if (c == '&' or c == '|' or c == ';' or c == '"' or c == '\'' or
-                    c == '<' or c == '>' or c == '`' or c == '(' or c == ')' or
-                    c == '^' or c == '%' or c == '!' or c == '\n' or c == '\r')
-                {
-                    return ToolResult.fail("URL contains shell metacharacters — open manually for safety");
-                }
-            }
-        }
-
-        // In test mode, skip actual browser spawn to avoid opening windows during CI/tests.
         if (builtin.is_test) {
-            const msg = try std.fmt.allocPrint(allocator, "Opened {s} in system browser", .{url});
+            const msg = try std.fmt.allocPrint(allocator, "Navigated to {s}", .{url});
             return ToolResult{ .success = true, .output = msg };
         }
 
-        const proc = @import("process_util.zig");
-        const argv: []const []const u8 = if (comptime builtin.os.tag == .windows)
-            &.{ "cmd.exe", "/c", "start", url }
-        else
-            &.{ comptime if (builtin.os.tag == .macos) "open" else "xdg-open", url };
-
-        const result = proc.run(allocator, argv, .{ .max_output_bytes = 4096 }) catch {
-            return ToolResult.fail("Failed to spawn browser open command");
+        const session_name = root.getString(args, "session") orelse "default";
+        const session = self.session_manager.getOrCreate(session_name) catch |err| {
+            return ToolResult.fail(switch (err) {
+                error.TooManySessions => "Too many browser sessions open. Close a session first.",
+                error.ChromeNotFound => "Chrome/Chromium not found. Install Chrome or set browser.native_chrome_path in config.",
+                else => "Failed to start browser session",
+            });
         };
-        result.deinit(allocator);
 
-        if (!result.success) {
-            if (result.exit_code) |code| {
-                const msg = try std.fmt.allocPrint(allocator, "Browser open command exited with code {d}", .{code});
-                return ToolResult{ .success = false, .output = "", .error_msg = msg };
-            }
-            return ToolResult{ .success = false, .output = "", .error_msg = "Browser open command terminated by signal" };
-        }
-
-        const msg = try std.fmt.allocPrint(allocator, "Opened {s} in system browser", .{url});
-        return ToolResult{ .success = true, .output = msg };
+        const output = browser_session_mod.cmdNavigate(session, allocator, url) catch |err| {
+            const msg = try std.fmt.allocPrint(allocator, "Navigation failed: {}", .{err});
+            return ToolResult{ .success = false, .output = "", .error_msg = msg };
+        };
+        return ToolResult{ .success = true, .output = output };
     }
 
-    /// "read" — fetch URL content via curl and return body text (truncated to 8 KB).
-    fn executeRead(allocator: std.mem.Allocator, args: JsonObjectMap) !ToolResult {
-        const url = root.getString(args, "url") orelse
-            return ToolResult.fail("Missing 'url' parameter for read action");
+    const CdpAction = enum { click, type_text, read, screenshot, scroll, wait, run_js, back };
 
-        // Use curl to fetch the page. Flags:
-        //   -sS  silent but show errors
-        //   -L   follow redirects
-        //   -m 10  timeout 10 seconds
-        //   --max-filesize 65536  abort if body exceeds 64 KB
-        const max_size_str = std.fmt.comptimePrint("{d}", .{MAX_FETCH_BYTES});
-        const proc = @import("process_util.zig");
-        const result = proc.run(allocator, &.{ "curl", "-sS", "-L", "-m", "10", "--max-filesize", max_size_str, url }, .{ .max_output_bytes = MAX_FETCH_BYTES }) catch {
-            return ToolResult.fail("Failed to spawn curl — is curl installed?");
+    /// Execute a CDP action on an existing session.
+    fn executeCdpAction(self: *BrowserTool, allocator: std.mem.Allocator, args: JsonObjectMap, action: CdpAction) !ToolResult {
+        // Validate required parameters before acquiring session
+        switch (action) {
+            .click => if (root.getString(args, "selector") == null)
+                return ToolResult.fail("Missing 'selector' parameter for click action"),
+            .type_text => {
+                if (root.getString(args, "selector") == null)
+                    return ToolResult.fail("Missing 'selector' parameter for type action");
+                if (root.getString(args, "text") == null)
+                    return ToolResult.fail("Missing 'text' parameter for type action");
+            },
+            .wait => if (root.getString(args, "selector") == null)
+                return ToolResult.fail("Missing 'selector' parameter for wait action"),
+            .run_js => if (root.getString(args, "expression") == null)
+                return ToolResult.fail("Missing 'expression' parameter for run_js action"),
+            else => {},
+        }
+
+        if (builtin.is_test) {
+            return ToolResult.fail("CDP actions require a running browser (not available in test mode)");
+        }
+
+        const session_name = root.getString(args, "session") orelse "default";
+        const session = self.session_manager.getOrCreate(session_name) catch
+            return ToolResult.fail("No browser session available. Use 'navigate' first.");
+
+        const output = switch (action) {
+            .click => blk: {
+                break :blk browser_session_mod.cmdClick(session, allocator, root.getString(args, "selector").?) catch
+                    return ToolResult.fail("Click action failed");
+            },
+            .type_text => blk: {
+                break :blk browser_session_mod.cmdType(session, allocator, root.getString(args, "selector").?, root.getString(args, "text").?) catch
+                    return ToolResult.fail("Type action failed");
+            },
+            .read => blk: {
+                break :blk browser_session_mod.cmdReadPage(session, allocator) catch
+                    return ToolResult.fail("Read action failed");
+            },
+            .screenshot => blk: {
+                break :blk browser_session_mod.cmdScreenshot(session, allocator, self.workspace_dir) catch
+                    return ToolResult.fail("Screenshot action failed");
+            },
+            .scroll => blk: {
+                const direction = root.getString(args, "direction") orelse "down";
+                const amount = root.getInt(args, "amount") orelse 300;
+                break :blk browser_session_mod.cmdScroll(session, allocator, direction, amount) catch
+                    return ToolResult.fail("Scroll action failed");
+            },
+            .wait => blk: {
+                const timeout_ms: u64 = if (root.getInt(args, "timeout_ms")) |t|
+                    @intCast(@max(0, t))
+                else
+                    5000;
+                break :blk browser_session_mod.cmdWait(session, allocator, root.getString(args, "selector").?, timeout_ms) catch
+                    return ToolResult.fail("Wait timed out");
+            },
+            .run_js => blk: {
+                break :blk browser_session_mod.cmdRunJs(session, allocator, root.getString(args, "expression").?) catch
+                    return ToolResult.fail("JavaScript execution failed");
+            },
+            .back => blk: {
+                break :blk browser_session_mod.cmdBack(session, allocator) catch
+                    return ToolResult.fail("Back navigation failed");
+            },
         };
-        defer allocator.free(result.stderr);
-        defer allocator.free(result.stdout);
-
-        if (!result.success) {
-            if (result.exit_code) |code| {
-                const detail = if (result.stderr.len > 0) result.stderr else "curl request failed";
-                const msg = try std.fmt.allocPrint(allocator, "curl exited with code {d}: {s}", .{ code, detail });
-                return ToolResult{ .success = false, .output = "", .error_msg = msg };
-            }
-            return ToolResult{ .success = false, .output = "", .error_msg = "curl terminated by signal" };
-        }
-
-        if (result.stdout.len == 0) {
-            const msg = try allocator.dupe(u8, "Page returned empty response");
-            return ToolResult{ .success = true, .output = msg };
-        }
-
-        // Truncate to MAX_READ_BYTES
-        const truncated = result.stdout.len > MAX_READ_BYTES;
-        const body_len = if (truncated) MAX_READ_BYTES else result.stdout.len;
-        const suffix: []const u8 = if (truncated) "\n\n[Content truncated to 8 KB]" else "";
-
-        const output = try std.fmt.allocPrint(allocator, "{s}{s}", .{ result.stdout[0..body_len], suffix });
         return ToolResult{ .success = true, .output = output };
     }
 };
 
 // ── Tests ───────────────────────────────────────────────────────────
 
+fn testTool() BrowserTool {
+    // In tests, session_manager won't be called (is_test guard skips CDP ops).
+    // Use undefined ptr — safe because test-mode returns before dereferencing.
+    return .{
+        .session_manager = undefined,
+        .config = &config_types.BrowserConfig{},
+    };
+}
+
 test "browser tool name" {
-    var bt = BrowserTool{};
+    var bt = testTool();
     const t = bt.tool();
     try std.testing.expectEqualStrings("browser", t.name());
 }
 
-test "browser open launches system browser" {
-    var bt = BrowserTool{};
-    const t = bt.tool();
-    // In test mode, spawn is skipped; verify the output message is correct.
-    const parsed = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://example.com\"}");
-    defer parsed.deinit();
-    const result = try t.execute(std.testing.allocator, parsed.value.object);
-    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
-    try std.testing.expect(result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "example.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "stub") == null);
-}
-
-test "browser open rejects http" {
-    var bt = BrowserTool{};
-    const t = bt.tool();
-    const parsed = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"http://example.com\"}");
-    defer parsed.deinit();
-    const result = try t.execute(std.testing.allocator, parsed.value.object);
-    try std.testing.expect(!result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "https") != null);
-}
-
-test "browser screenshot redirects to screenshot tool" {
-    var bt = BrowserTool{};
-    const t = bt.tool();
-    const parsed = try root.parseTestArgs("{\"action\": \"screenshot\"}");
-    defer parsed.deinit();
-    const result = try t.execute(std.testing.allocator, parsed.value.object);
-    try std.testing.expect(!result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "screenshot tool") != null);
-}
-
-// ── Additional browser tests ────────────────────────────────────
-
 test "browser missing action parameter" {
-    var bt = BrowserTool{};
+    var bt = testTool();
     const t = bt.tool();
     const parsed = try root.parseTestArgs("{}");
     defer parsed.deinit();
@@ -202,84 +211,165 @@ test "browser missing action parameter" {
     try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "action") != null);
 }
 
-test "browser open missing url" {
-    var bt = BrowserTool{};
+test "browser navigate missing url" {
+    var bt = testTool();
     const t = bt.tool();
-    const parsed = try root.parseTestArgs("{\"action\": \"open\"}");
+    const parsed = try root.parseTestArgs("{\"action\": \"navigate\"}");
     defer parsed.deinit();
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     try std.testing.expect(!result.success);
     try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "url") != null);
 }
 
-test "browser click action requires CDP" {
-    var bt = BrowserTool{};
+test "browser open is alias for navigate" {
+    var bt = testTool();
     const t = bt.tool();
-    const parsed = try root.parseTestArgs("{\"action\": \"click\", \"selector\": \"#btn\"}");
-    defer parsed.deinit();
-    const result = try t.execute(std.testing.allocator, parsed.value.object);
-    defer if (result.error_msg) |e| std.testing.allocator.free(e);
-    try std.testing.expect(!result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "CDP") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "click") != null);
-}
-
-test "browser read missing url" {
-    var bt = BrowserTool{};
-    const t = bt.tool();
-    const parsed = try root.parseTestArgs("{\"action\": \"read\"}");
-    defer parsed.deinit();
-    const result = try t.execute(std.testing.allocator, parsed.value.object);
-    try std.testing.expect(!result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "url") != null);
-}
-
-test "browser open returns output with URL" {
-    var bt = BrowserTool{};
-    const t = bt.tool();
-    // In test mode, spawn is skipped; verify the "Opened ..." message format.
-    const parsed = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://docs.example.com/api\"}");
+    const parsed = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://example.com\"}");
     defer parsed.deinit();
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer if (result.output.len > 0) std.testing.allocator.free(result.output);
     try std.testing.expect(result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "docs.example.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "Opened") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "example.com") != null);
 }
 
-test "browser schema has enum values" {
-    var bt = BrowserTool{};
+test "browser navigate SSRF blocks localhost" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"navigate\", \"url\": \"https://localhost/admin\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "localhost") != null);
+}
+
+test "browser navigate SSRF blocks private IP" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"navigate\", \"url\": \"https://127.0.0.1/secret\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "localhost") != null);
+}
+
+test "browser navigate blocks http" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"navigate\", \"url\": \"http://example.com\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "https") != null);
+}
+
+test "browser navigate yolo allows http" {
+    var bt = testTool();
+    bt.autonomy = .yolo;
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"navigate\", \"url\": \"http://example.com\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+}
+
+test "browser navigate allows https" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"navigate\", \"url\": \"https://example.com\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+}
+
+test "browser unknown action" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"fly\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    defer if (result.error_msg) |e| std.testing.allocator.free(e);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "fly") != null);
+}
+
+test "browser click requires selector" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"click\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "selector") != null);
+}
+
+test "browser type requires selector and text" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"type\", \"selector\": \"#input\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "text") != null);
+}
+
+test "browser wait requires selector" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"wait\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "selector") != null);
+}
+
+test "browser run_js requires expression" {
+    var bt = testTool();
+    const t = bt.tool();
+    const parsed = try root.parseTestArgs("{\"action\": \"run_js\"}");
+    defer parsed.deinit();
+    const result = try t.execute(std.testing.allocator, parsed.value.object);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "expression") != null);
+}
+
+test "browser schema has new actions" {
+    var bt = testTool();
     const t = bt.tool();
     const schema = t.parametersJson();
+    try std.testing.expect(std.mem.indexOf(u8, schema, "navigate") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "run_js") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "wait") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "back") != null);
+    try std.testing.expect(std.mem.indexOf(u8, schema, "close") != null);
     try std.testing.expect(std.mem.indexOf(u8, schema, "screenshot") != null);
     try std.testing.expect(std.mem.indexOf(u8, schema, "open") != null);
-    try std.testing.expect(std.mem.indexOf(u8, schema, "click") != null);
-    try std.testing.expect(std.mem.indexOf(u8, schema, "scroll") != null);
 }
 
-test "browser description mentions browse" {
-    var bt = BrowserTool{};
+test "browser description mentions headless" {
+    var bt = testTool();
     const t = bt.tool();
     const desc = t.description();
     try std.testing.expect(std.mem.indexOf(u8, desc, "Browse") != null or std.mem.indexOf(u8, desc, "browse") != null or std.mem.indexOf(u8, desc, "web") != null);
 }
 
 test "browser tool schema has url" {
-    var bt = BrowserTool{};
+    var bt = testTool();
     const t = bt.tool();
     const schema = t.parametersJson();
     try std.testing.expect(std.mem.indexOf(u8, schema, "url") != null);
 }
 
 test "browser tool schema has action" {
-    var bt = BrowserTool{};
+    var bt = testTool();
     const t = bt.tool();
     const schema = t.parametersJson();
     try std.testing.expect(std.mem.indexOf(u8, schema, "action") != null);
 }
 
 test "browser tool execute with empty json" {
-    var bt = BrowserTool{};
+    var bt = testTool();
     const t = bt.tool();
     const parsed = try root.parseTestArgs("{}");
     defer parsed.deinit();
@@ -287,38 +377,18 @@ test "browser tool execute with empty json" {
     try std.testing.expect(!result.success);
 }
 
-test "browser open rejects URL with shell metacharacters on Windows" {
-    // On Windows, cmd.exe /c start interprets metacharacters — they must be blocked.
-    // On Unix, open/xdg-open uses execvp so metacharacters in argv are safe.
-    if (comptime builtin.os.tag != .windows) return error.SkipZigTest;
-
-    var bt = BrowserTool{};
+test "browser navigate allowlist blocks unlisted host" {
+    const domains = [_][]const u8{"allowed.com"};
+    var cfg = config_types.BrowserConfig{};
+    cfg.allowed_domains = &domains;
+    var bt = BrowserTool{
+        .session_manager = undefined,
+        .config = &cfg,
+    };
     const t = bt.tool();
-
-    // & can chain commands in cmd.exe
-    const p1 = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://example.com&whoami\"}");
-    defer p1.deinit();
-    const r1 = try t.execute(std.testing.allocator, p1.value.object);
-    try std.testing.expect(!r1.success);
-    try std.testing.expect(std.mem.indexOf(u8, r1.error_msg.?, "metacharacter") != null);
-
-    // | can pipe in cmd.exe
-    const p2 = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://example.com|calc\"}");
-    defer p2.deinit();
-    const r2 = try t.execute(std.testing.allocator, p2.value.object);
-    try std.testing.expect(!r2.success);
-}
-
-test "browser open allows URL with query params on Unix" {
-    // On Unix, & in query strings is safe (passed as argv to open/xdg-open).
-    if (comptime builtin.os.tag == .windows) return error.SkipZigTest;
-
-    var bt = BrowserTool{};
-    const t = bt.tool();
-    const parsed = try root.parseTestArgs("{\"action\": \"open\", \"url\": \"https://example.com/search?a=1&b=2\"}");
+    const parsed = try root.parseTestArgs("{\"action\": \"navigate\", \"url\": \"https://blocked.com/page\"}");
     defer parsed.deinit();
     const result = try t.execute(std.testing.allocator, parsed.value.object);
-    defer if (result.output.len > 0) std.testing.allocator.free(result.output);
-    try std.testing.expect(result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "example.com") != null);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.error_msg.?, "allowed_domains") != null);
 }
