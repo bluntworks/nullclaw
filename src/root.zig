@@ -77,6 +77,9 @@ pub const agent_routing = @import("agent_routing.zig");
 // Phase 4f: TUI
 pub const tui = @import("tui/root.zig");
 
+// Phase 4g: CDP (Chrome DevTools Protocol)
+pub const cdp = @import("cdp.zig");
+
 // Phase 5: Hardware & Integrations
 pub const hardware = @import("hardware.zig");
 pub const integrations = @import("integrations.zig");

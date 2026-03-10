@@ -1078,6 +1078,11 @@ pub const BrowserConfig = struct {
     native_chrome_path: ?[]const u8 = null,
     computer_use: BrowserComputerUseConfig = .{},
     allowed_domains: []const []const u8 = &.{},
+    viewport_width: u16 = 1280,
+    viewport_height: u16 = 720,
+    timeout_secs: u16 = 30,
+    idle_timeout_secs: u32 = 300,
+    max_sessions: u8 = 5,
 };
 
 // ── HTTP request config ─────────────────────────────────────────
