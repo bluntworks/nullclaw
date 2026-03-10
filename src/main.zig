@@ -273,7 +273,7 @@ fn runGateway(allocator: std.mem.Allocator, sub_args: []const []const u8) !void 
         std.process.exit(1);
     };
 
-    // Check both sub_args and global args for --verbose flag 
+    // Check both sub_args and global args for --verbose flag
     var verbose = hasVerboseFlag(sub_args);
     if (!verbose) {
         // Also check global args for --verbose flag
@@ -1861,6 +1861,13 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
     ) catch null;
     defer if (bootstrap_provider) |bp| bp.deinit();
 
+    // Browser session manager
+    const browser_mgr_ch = if (config.browser.enabled)
+        yc.browser_session.BrowserSessionManager.init(allocator, &config.browser) catch null
+    else
+        null;
+    defer if (browser_mgr_ch) |mgr| mgr.deinit();
+
     // Create tools (for system prompt and tool calling)
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
@@ -1881,6 +1888,9 @@ fn runSignalChannel(allocator: std.mem.Allocator, args: []const []const u8, conf
         .subagent_manager = &subagent_manager,
         .bootstrap_provider = bootstrap_provider,
         .backend_name = config.memory.backend,
+        .browser_session_manager = browser_mgr_ch,
+        .browser_config = &config.browser,
+        .browser_autonomy = config.autonomy.level,
     }) catch &.{};
     defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 
@@ -2182,6 +2192,13 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
     ) catch null;
     defer if (bootstrap_provider) |bp| bp.deinit();
 
+    // Browser session manager
+    const browser_mgr_tui = if (config.browser.enabled)
+        yc.browser_session.BrowserSessionManager.init(allocator, &config.browser) catch null
+    else
+        null;
+    defer if (browser_mgr_tui) |mgr| mgr.deinit();
+
     // Create tools (for system prompt and tool calling)
     const tools = yc.tools.allTools(allocator, config.workspace_dir, .{
         .http_enabled = config.http_request.enabled,
@@ -2202,6 +2219,9 @@ fn runTelegramChannel(allocator: std.mem.Allocator, args: []const []const u8, co
         .subagent_manager = &subagent_manager,
         .bootstrap_provider = bootstrap_provider,
         .backend_name = config.memory.backend,
+        .browser_session_manager = browser_mgr_tui,
+        .browser_config = &config.browser,
+        .browser_autonomy = config.autonomy.level,
     }) catch &.{};
     defer if (tools.len > 0) yc.tools.deinitTools(allocator, tools);
 

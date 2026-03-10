@@ -415,6 +415,14 @@ pub const ChannelRuntime = struct {
         ) catch null;
         errdefer if (bootstrap_provider) |bp| bp.deinit();
 
+        // Browser session manager
+        const browser_session_mod = @import("browser_session.zig");
+        const browser_mgr = if (config.browser.enabled)
+            browser_session_mod.BrowserSessionManager.init(allocator, &config.browser) catch null
+        else
+            null;
+        errdefer if (browser_mgr) |mgr| mgr.deinit();
+
         // Tools
         const tools = tools_mod.allTools(allocator, config.workspace_dir, .{
             .http_enabled = config.http_request.enabled,
@@ -435,6 +443,9 @@ pub const ChannelRuntime = struct {
             .subagent_manager = subagent_manager,
             .bootstrap_provider = bootstrap_provider,
             .backend_name = config.memory.backend,
+            .browser_session_manager = browser_mgr,
+            .browser_config = &config.browser,
+            .browser_autonomy = config.autonomy.level,
         }) catch &.{};
         errdefer if (tools.len > 0) tools_mod.deinitTools(allocator, tools);
 

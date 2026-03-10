@@ -2645,6 +2645,14 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     subagent_manager_opt = mgr;
                 }
 
+                // Browser session manager
+                const browser_session_mod = @import("browser_session.zig");
+                const browser_mgr_gw = if (cfg.browser.enabled)
+                    browser_session_mod.BrowserSessionManager.init(allocator, &cfg.browser) catch null
+                else
+                    null;
+                defer if (browser_mgr_gw) |mgr| mgr.deinit();
+
                 // Tools.
                 tools_slice = tools_mod.allTools(allocator, cfg.workspace_dir, .{
                     .http_enabled = cfg.http_request.enabled,
@@ -2663,6 +2671,9 @@ pub fn run(allocator: std.mem.Allocator, host: []const u8, port: u16, config_ptr
                     .subagent_manager = subagent_manager_opt,
                     .bootstrap_provider = bootstrap_provider_opt,
                     .backend_name = cfg.memory.backend,
+                    .browser_session_manager = browser_mgr_gw,
+                    .browser_config = &cfg.browser,
+                    .browser_autonomy = cfg.autonomy.level,
                 }) catch &.{};
 
                 var sm = session_mod.SessionManager.init(allocator, cfg, provider_i, tools_slice, mem_opt, gateway_thread_observer.observer(), if (mem_rt) |rt| rt.session_store else null, if (mem_rt) |*rt| rt.response_cache else null);

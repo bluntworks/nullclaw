@@ -253,6 +253,14 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
     ) catch null;
     defer if (bootstrap_provider) |bp| bp.deinit();
 
+    // Browser session manager (heap-allocated for pointer stability).
+    const browser_session_mod = @import("../browser_session.zig");
+    const browser_mgr = if (cfg.browser.enabled)
+        browser_session_mod.BrowserSessionManager.init(allocator, &cfg.browser) catch null
+    else
+        null;
+    defer if (browser_mgr) |mgr| mgr.deinit();
+
     // Create tools (with agents config for delegate depth enforcement)
     const tools = try tools_mod.allTools(allocator, cfg.workspace_dir, .{
         .http_enabled = cfg.http_request.enabled,
@@ -273,6 +281,9 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         .subagent_manager = &subagent_manager,
         .bootstrap_provider = bootstrap_provider,
         .backend_name = cfg.memory.backend,
+        .browser_session_manager = browser_mgr,
+        .browser_config = &cfg.browser,
+        .browser_autonomy = cfg.autonomy.level,
     });
     defer tools_mod.deinitTools(allocator, tools);
 
