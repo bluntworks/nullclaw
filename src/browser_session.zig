@@ -213,8 +213,7 @@ fn launchAndConnect(allocator: std.mem.Allocator, config: *const config_types.Br
 
     // Parse page WS path
     const page_uri = std.Uri.parse(page_ws) catch return error.InvalidDevtoolsUrl;
-    const path_component = page_uri.path orelse return error.InvalidDevtoolsUrl;
-    const path = switch (path_component) {
+    const path = switch (page_uri.path) {
         .raw => |p| p,
         .percent_encoded => |p| p,
     };
@@ -390,10 +389,10 @@ pub fn cmdScreenshot(session: *BrowserSession, allocator: std.mem.Allocator, wor
     const b64_data = result[data_start..data_end];
 
     // Decode base64
-    const decoded_size = std.base64.standard.Decoder.calcSizeUpperBound(b64_data.len);
+    const decoded_size = std.base64.standard.Decoder.calcSizeUpperBound(b64_data.len) catch return error.ScreenshotFailed;
     const decoded = try allocator.alloc(u8, decoded_size);
     defer allocator.free(decoded);
-    const actual_len = std.base64.standard.Decoder.decode(decoded, b64_data) catch return error.ScreenshotFailed;
+    std.base64.standard.Decoder.decode(decoded, b64_data) catch return error.ScreenshotFailed;
 
     // Write to file
     const filename = "cdp_screenshot.png";
@@ -403,7 +402,7 @@ pub fn cmdScreenshot(session: *BrowserSession, allocator: std.mem.Allocator, wor
 
     const file = try std.fs.createFileAbsolute(output_path, .{});
     defer file.close();
-    try file.writeAll(decoded[0..actual_len]);
+    try file.writeAll(decoded);
 
     return std.fmt.allocPrint(allocator, "[IMAGE:{s}]", .{output_path});
 }
