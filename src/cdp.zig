@@ -358,7 +358,7 @@ fn extractJsonId(json: []const u8) ?u64 {
 }
 
 /// Escape a string for embedding in a JSON string value.
-fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+pub fn jsonEscape(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     var out: std.ArrayListUnmanaged(u8) = .empty;
     errdefer out.deinit(allocator);
 

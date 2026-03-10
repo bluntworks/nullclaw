@@ -35,6 +35,12 @@ pub fn setThreadInterruptFlag(flag: ?*const AtomicBool) void {
     thread_interrupt_flag = flag;
 }
 
+/// Check if the current thread's interrupt flag is set.
+pub fn isInterrupted() bool {
+    const flag = thread_interrupt_flag orelse return false;
+    return flag.load(.acquire);
+}
+
 /// Result of a child process execution.
 pub const RunResult = struct {
     stdout: []u8,

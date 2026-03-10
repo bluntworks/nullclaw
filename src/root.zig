@@ -79,6 +79,7 @@ pub const tui = @import("tui/root.zig");
 
 // Phase 4g: CDP (Chrome DevTools Protocol)
 pub const cdp = @import("cdp.zig");
+pub const browser_session = @import("browser_session.zig");
 
 // Phase 5: Hardware & Integrations
 pub const hardware = @import("hardware.zig");
