@@ -109,6 +109,26 @@ Notes:
 | `nullclaw skills remove <name>` | Remove a skill |
 | `nullclaw skills info <name>` | Show skill metadata |
 
+### Browser tool actions
+
+The `browser` tool is available to the agent when `browser.enabled = true` in config. It drives a headless Chrome instance via CDP (Chrome DevTools Protocol).
+
+| Action | Required params | Description |
+|---|---|---|
+| `navigate` | `url` | Navigate to a URL. SSRF-protected (localhost blocked, HTTPS required unless `autonomy.level = yolo`) |
+| `open` | `url` | Alias for `navigate` (backward compatible) |
+| `click` | `selector` | Click an element by CSS selector or text content |
+| `type` | `selector`, `text` | Type text into a form element |
+| `read` | — | Extract current page content as formatted text |
+| `screenshot` | — | Capture page screenshot, returns `[IMAGE:path]` |
+| `scroll` | — | Scroll the page. Optional: `direction` (up/down/left/right), `amount` (pixels, default 300) |
+| `wait` | `selector` | Wait for an element to appear. Optional: `timeout_ms` (default 5000) |
+| `run_js` | `expression` | Execute arbitrary JavaScript and return the result |
+| `back` | — | Navigate back in browser history |
+| `close` | — | Close the browser session. Optional: `session` name |
+
+All actions accept an optional `session` parameter to manage multiple named sessions (default: `"default"`).
+
 ## Data, models, and workspace
 
 ### `memory`

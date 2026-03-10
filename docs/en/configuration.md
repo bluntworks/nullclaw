@@ -162,6 +162,44 @@ Avoid direct public exposure. Use tunnel when external access is required.
 - `sandbox.backend = "auto"`: auto-selects an available sandbox backend.
 - `audit.enabled = true`: recommended for traceability.
 
+### `browser`
+
+Headless Chrome automation via CDP (Chrome DevTools Protocol).
+
+```json
+{
+  "browser": {
+    "enabled": true,
+    "native_chrome_path": null,
+    "native_headless": true,
+    "viewport_width": 1280,
+    "viewport_height": 720,
+    "timeout_secs": 30,
+    "idle_timeout_secs": 300,
+    "max_sessions": 5,
+    "allowed_domains": []
+  }
+}
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `enabled` | `false` | Enable the browser tool for the agent |
+| `native_chrome_path` | `null` | Path to Chrome/Chromium binary. Auto-detected if null |
+| `native_headless` | `true` | Run Chrome in headless mode |
+| `viewport_width` | `1280` | Browser viewport width in pixels |
+| `viewport_height` | `720` | Browser viewport height in pixels |
+| `timeout_secs` | `30` | CDP command timeout in seconds |
+| `idle_timeout_secs` | `300` | Close idle sessions after this many seconds |
+| `max_sessions` | `5` | Maximum concurrent browser sessions |
+| `allowed_domains` | `[]` | Domain allowlist. Empty = allow all public domains |
+
+Notes:
+
+- Chrome/Chromium must be installed. Set `native_chrome_path` if not auto-detected.
+- SSRF protection blocks localhost/private IPs and requires HTTPS unless `autonomy.level = yolo`.
+- `allowed_domains` supports wildcards: `["*.example.com", "docs.other.com"]`.
+
 ### Advanced: Web Search + Full Shell (high risk)
 
 Use only in controlled environments:
