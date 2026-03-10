@@ -27,25 +27,12 @@ const streaming = @import("../streaming.zig");
 const verbose = @import("../verbose.zig");
 
 const Agent = @import("root.zig").Agent;
-const tui_mod = @import("../tui/root.zig");
 
 const CliStreamCtx = struct {
     sink: streaming.Sink,
 };
 
 fn cliStreamSinkCallback(_: *anyopaque, event: streaming.Event) void {
-    if (event.stage == .tool_call) {
-        const name = streaming.TagFilter.extractToolName(event.text);
-        const args = streaming.TagFilter.extractToolArgs(event.text);
-        var buf: [8192]u8 = undefined;
-        var bw = std.fs.File.stdout().writer(&buf);
-        const wr = &bw.interface;
-        wr.print("\n\x1b[44;30m {s} \x1b[0m", .{name}) catch {};
-        if (args.len > 0) wr.print(" \x1b[90m{s}\x1b[0m", .{args}) catch {};
-        wr.print("\n\n", .{}) catch {};
-        wr.flush() catch {};
-        return;
-    }
     if (event.stage != .chunk or event.text.len == 0) return;
     var buf: [4096]u8 = undefined;
     var bw = std.fs.File.stdout().writer(&buf);
@@ -57,52 +44,6 @@ fn cliStreamSinkCallback(_: *anyopaque, event: streaming.Event) void {
 /// Streaming callback that forwards provider chunks into unified stream sink events.
 fn cliStreamCallback(ctx_ptr: *anyopaque, chunk: providers.StreamChunk) void {
     const stream_ctx: *CliStreamCtx = @ptrCast(@alignCast(ctx_ptr));
-    streaming.forwardProviderChunk(stream_ctx.sink, chunk);
-}
-
-// -- TUI streaming context ------------------------------------------------
-
-const TuiStreamCtx = struct {
-    renderer: *tui_mod.Renderer,
-    sink: streaming.Sink,
-};
-
-fn tuiStreamSinkCallback(ctx: *anyopaque, event: streaming.Event) void {
-    const r: *tui_mod.Renderer = @ptrCast(@alignCast(ctx));
-    if (event.stage == .tool_call) {
-        const name = streaming.TagFilter.extractToolName(event.text);
-        const args = streaming.TagFilter.extractToolArgs(event.text);
-        var fmt_buf: [4096]u8 = undefined;
-        const formatted = if (args.len > 0)
-            std.fmt.bufPrint(&fmt_buf, "\x1b[44;30m {s} \x1b[0m \x1b[90m{s}\x1b[0m", .{ name, args }) catch return
-        else
-            std.fmt.bufPrint(&fmt_buf, "\x1b[44;30m {s} \x1b[0m", .{name}) catch return;
-        r.appendRawLine(formatted);
-        r.appendLine("", false);
-
-        // Log tool calls to the log panel
-        var log_buf: [256]u8 = undefined;
-        const log_msg = if (args.len > 0)
-            std.fmt.bufPrint(&log_buf, "[tool] {s} {s}", .{ name, args[0..@min(args.len, 128)] }) catch name
-        else
-            std.fmt.bufPrint(&log_buf, "[tool] {s}", .{name}) catch name;
-        r.appendLog(log_msg);
-
-        r.draw() catch {};
-        return;
-    }
-    if (event.stage == .chunk and event.text.len > 0) {
-        r.appendStreamChunk(event.text);
-        r.draw() catch {};
-    } else if (event.stage == .final) {
-        r.endStreaming();
-        r.hideThinking();
-        r.draw() catch {};
-    }
-}
-
-fn tuiStreamCallback(ctx_ptr: *anyopaque, chunk: providers.StreamChunk) void {
-    const stream_ctx: *TuiStreamCtx = @ptrCast(@alignCast(ctx_ptr));
     streaming.forwardProviderChunk(stream_ctx.sink, chunk);
 }
 
@@ -151,7 +92,6 @@ const ParsedAgentArgs = struct {
     model_override: ?[]const u8 = null,
     temperature_override: ?f64 = null,
     verbose: bool = false,
-    use_tui: bool = false,
 };
 
 const AgentArgParseResult = union(enum) {
@@ -188,8 +128,6 @@ fn parseAgentArgs(args: []const []const u8) AgentArgParseResult {
             parsed.temperature_override = temp;
         } else if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
             parsed.verbose = true;
-        } else if (std.mem.eql(u8, arg, "--tui")) {
-            parsed.use_tui = true;
         }
     }
     return .{ .ok = parsed };
@@ -371,12 +309,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
         // Enable streaming if provider supports it
         var stream_sink_ctx: u8 = 0;
-        var tag_filter = streaming.TagFilter.init(.{
-            .callback = cliStreamSinkCallback,
-            .ctx = @ptrCast(&stream_sink_ctx),
-        });
         var stream_ctx = CliStreamCtx{
-            .sink = tag_filter.sink(),
+            .sink = .{
+                .callback = cliStreamSinkCallback,
+                .ctx = @ptrCast(&stream_sink_ctx),
+            },
         };
         if (supports_streaming) {
             agent.stream_callback = cliStreamCallback;
@@ -405,22 +342,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
         try w.flush();
         return;
-    }
-
-    // TUI mode: --tui flag activates full terminal UI
-    if (parsed_args.use_tui) {
-        return runTui(
-            allocator,
-            &cfg,
-            provider_i,
-            supports_streaming,
-            tools,
-            mem_opt,
-            mem_rt,
-            obs,
-            &policy,
-            session_id,
-        );
     }
 
     // Interactive REPL mode
@@ -483,12 +404,11 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
 
     // Enable streaming if provider supports it
     var stream_sink_ctx: u8 = 0;
-    var tag_filter = streaming.TagFilter.init(.{
-        .callback = cliStreamSinkCallback,
-        .ctx = @ptrCast(&stream_sink_ctx),
-    });
     var stream_ctx = CliStreamCtx{
-        .sink = tag_filter.sink(),
+        .sink = .{
+            .callback = cliStreamSinkCallback,
+            .ctx = @ptrCast(&stream_sink_ctx),
+        },
     };
     if (supports_streaming) {
         agent.stream_callback = cliStreamCallback;
@@ -540,188 +460,6 @@ pub fn run(allocator: std.mem.Allocator, args: []const [:0]const u8) !void {
         }
         try w.flush();
     }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// TUI REPL
-// ═══════════════════════════════════════════════════════════════════════════
-
-fn runTui(
-    allocator: std.mem.Allocator,
-    cfg: *Config,
-    provider_i: Provider,
-    supports_streaming: bool,
-    tools: []const Tool,
-    mem_opt: ?Memory,
-    mem_rt: ?memory_mod.MemoryRuntime,
-    obs: Observer,
-    policy: *security.SecurityPolicy,
-    session_id: ?[]const u8,
-) !void {
-    var terminal = tui_mod.Terminal.init();
-    try terminal.enableRawMode();
-    errdefer terminal.cleanup();
-
-    try terminal.enterAltScreen();
-    try terminal.clearScreen();
-    tui_mod.terminal.Terminal.installResizeHandler();
-
-    var renderer = tui_mod.Renderer.init(&terminal);
-    renderer.setStatus(cfg.default_provider, cfg.default_model orelse "(default)");
-
-    // Welcome message in chat area
-    renderer.appendLine("nullclaw Agent -- TUI Mode", false);
-    renderer.appendLine("", false);
-    renderer.appendText(
-        "Type your message and press Enter. Ctrl+C or 'exit' to quit.",
-        false,
-    );
-    renderer.appendLine("", false);
-
-    // Load command history
-    const history_path = cli_mod.defaultHistoryPath(allocator) catch null;
-    defer if (history_path) |hp| allocator.free(hp);
-
-    var repl_history: std.ArrayListUnmanaged([]const u8) = .empty;
-    defer {
-        if (history_path) |hp| {
-            cli_mod.saveHistory(repl_history.items, hp) catch {};
-        }
-        for (repl_history.items) |entry| allocator.free(entry);
-        repl_history.deinit(allocator);
-    }
-
-    if (history_path) |hp| {
-        const loaded = cli_mod.loadHistory(allocator, hp) catch null;
-        if (loaded) |entries| {
-            defer allocator.free(entries);
-            for (entries) |entry| {
-                repl_history.append(allocator, entry) catch {
-                    allocator.free(entry);
-                };
-            }
-        }
-    }
-
-    var line_editor = tui_mod.LineEditor{};
-    line_editor.setHistory(repl_history.items);
-    line_editor.prompt = "> ";
-
-    var agent = try Agent.fromConfig(allocator, cfg, provider_i, tools, mem_opt, obs);
-    agent.policy = policy;
-    agent.session_store = if (mem_rt) |rt| rt.session_store else null;
-    agent.response_cache = null;
-    agent.mem_rt = null;
-    if (session_id) |sid| {
-        agent.memory_session_id = sid;
-    }
-    defer agent.deinit();
-
-    // Set up streaming (TagFilter strips <tool_call>/<tool_result> XML)
-    var tag_filter = streaming.TagFilter.init(.{
-        .callback = tuiStreamSinkCallback,
-        .ctx = @ptrCast(&renderer),
-    });
-    var stream_ctx = TuiStreamCtx{
-        .renderer = &renderer,
-        .sink = tag_filter.sink(),
-    };
-    if (supports_streaming) {
-        agent.stream_callback = tuiStreamCallback;
-        agent.stream_ctx = @ptrCast(&stream_ctx);
-    }
-
-    // Initial draw
-    line_editor.render_row = renderer.inputRow();
-    try renderer.draw();
-    try line_editor.render(&terminal);
-
-    // Main event loop
-    while (true) {
-        // Check for resize
-        if (tui_mod.terminal.resize_pending.load(.acquire)) {
-            tui_mod.terminal.resize_pending.store(false, .release);
-            renderer.resize();
-            line_editor.render_row = renderer.inputRow();
-            try renderer.draw();
-            try line_editor.render(&terminal);
-        }
-
-        const key = tui_mod.input.readKey() orelse {
-            // EOF
-            break;
-        };
-
-        // Handle Ctrl+C / Ctrl+D
-        switch (key) {
-            .ctrl_c => break,
-            .ctrl_d => break,
-            .ctrl_l => {
-                // Clear and redraw
-                try terminal.clearScreen();
-                try renderer.draw();
-                try line_editor.render(&terminal);
-                continue;
-            },
-            else => {},
-        }
-
-        if (line_editor.handleKey(key)) |line| {
-            // Check for quit commands
-            if (cli_mod.CliChannel.isQuitCommand(line)) break;
-
-            // Copy line for history and agent
-            const line_copy = allocator.dupe(u8, line) catch continue;
-
-            // Show user message in chat area
-            renderer.appendLine("", false);
-            var user_buf: [tui_mod.line_editor.MAX_LINE + 3]u8 = undefined;
-            const user_line = std.fmt.bufPrint(&user_buf, "> {s}", .{line}) catch line;
-            renderer.appendLine(user_line, true);
-            renderer.appendLine("", false);
-
-            // Add to history
-            repl_history.append(allocator, line_copy) catch {};
-            line_editor.setHistory(repl_history.items);
-
-            // Clear editor for next input
-            line_editor.clear();
-
-            // Show thinking state
-            renderer.showThinking();
-            try renderer.draw();
-            try line_editor.render(&terminal);
-
-            // Run agent turn
-            const response = agent.turn(line_copy) catch |err| {
-                renderer.hideThinking();
-                var err_buf: [256]u8 = undefined;
-                const err_msg = std.fmt.bufPrint(&err_buf, "Error: {}", .{err}) catch "Error";
-                renderer.appendLine(err_msg, false);
-                renderer.appendLog(err_msg);
-                try renderer.draw();
-                try line_editor.render(&terminal);
-                continue;
-            };
-            defer allocator.free(response);
-
-            renderer.hideThinking();
-
-            if (!supports_streaming) {
-                renderer.appendText(response, false);
-            }
-            renderer.appendLine("", false);
-
-            try renderer.draw();
-            try line_editor.render(&terminal);
-        } else {
-            // Key didn't produce a line; just re-render the input
-            try line_editor.render(&terminal);
-        }
-    }
-
-    // Cleanup
-    terminal.cleanup();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -811,25 +549,6 @@ test "parseAgentArgs returns error for invalid temperature value" {
         .invalid_temperature => |value| try std.testing.expectEqualStrings("hot", value),
         else => unreachable,
     }
-}
-
-test "parseAgentArgs recognizes --tui flag" {
-    const args = [_][]const u8{ "--tui", "-m", "hi" };
-    const parsed = switch (parseAgentArgs(&args)) {
-        .ok => |value| value,
-        else => unreachable,
-    };
-    try std.testing.expect(parsed.use_tui);
-    try std.testing.expectEqualStrings("hi", parsed.message_arg.?);
-}
-
-test "parseAgentArgs defaults use_tui to false" {
-    const args = [_][]const u8{ "-m", "hello" };
-    const parsed = switch (parseAgentArgs(&args)) {
-        .ok => |value| value,
-        else => unreachable,
-    };
-    try std.testing.expect(!parsed.use_tui);
 }
 
 test "shouldPrintOpenAiCodexHint true when codex auth exists and provider differs" {
