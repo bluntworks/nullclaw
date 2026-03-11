@@ -9,6 +9,15 @@ This project uses [CalVer](https://calver.org/) versioning (YYYY.M.D).
 
 ### Added
 
+- **CDP browser automation** (`src/cdp.zig`, `src/browser_session.zig`): Chrome DevTools Protocol transport over raw TCP WebSocket, with background reader thread and JSON-RPC request/response routing
+  - Browser tool rewritten with 11 CDP-backed actions: `navigate`, `click`, `type`, `read`, `screenshot`, `scroll`, `wait`, `run_js`, `back`, `close`, plus `open` as backward-compatible alias
+  - Session manager supporting multiple named sessions with configurable limits (`max_sessions`)
+  - Chrome auto-detection across macOS, Linux, Windows; `CHROME_PATH` env and `native_chrome_path` config override
+  - SSRF protection on navigate: localhost/private IP blocking, domain allowlist, HTTPS requirement (bypassed by `autonomy.level = yolo`)
+  - Screenshot output uses `[IMAGE:path]` format compatible with multimodal vision pipeline
+  - New `BrowserConfig` fields: `viewport_width`, `viewport_height`, `timeout_secs`, `idle_timeout_secs`, `max_sessions`
+  - `process_util.isInterrupted()` accessor for cooperative cancellation in wait/poll loops
+  - Wired at all 5 tool creation callsites (agent CLI, channel loop, gateway, channel mode, TUI mode)
 - **TUI log panel**: 3-line diagnostic panel at the bottom of TUI mode showing tool calls, errors, and provider failures in dim grey text (50-entry ring buffer, resize-aware)
 - **web_search scoped logging**: `std.log.scoped(.web_search)` warnings on individual provider failures and all-providers-failed (stderr, for non-TUI modes)
 - **TUI mode** (`src/tui/`): full-screen terminal interface with alt screen, status bar, scrollback chat area, and styled output — built from scratch using ANSI escape codes with zero external dependencies
