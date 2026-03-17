@@ -48,6 +48,25 @@ pub const ProviderEntry = struct {
     /// Optional User-Agent header for HTTP requests to this provider.
     /// When set, requests will include "User-Agent: {value}" header.
     user_agent: ?[]const u8 = null,
+    /// Optional Claude CLI-specific configuration.
+    /// Only used when provider is "claude-cli".
+    claude_cli: ?ClaudeCliConfig = null,
+};
+
+/// Configuration for the Claude CLI (Claude Code) provider.
+pub const ClaudeCliConfig = struct {
+    /// Tools Claude Code is allowed to use without prompting.
+    allowed_tools: []const []const u8 = &.{},
+    /// Tools Claude Code must NOT use.
+    disallowed_tools: []const []const u8 = &.{},
+    /// Max agentic turns per invocation. 0 = default.
+    max_turns: u32 = 0,
+    /// Effort level: "low", "medium", "high", "max". null = default.
+    effort: ?[]const u8 = null,
+    /// Maximum spend per invocation in USD. 0 = no limit.
+    max_budget_usd: f64 = 0,
+    /// Skip permission prompts in headless mode.
+    skip_permissions: bool = true,
 };
 
 // ── Audio media config (tools.media.audio) ─────────────────────

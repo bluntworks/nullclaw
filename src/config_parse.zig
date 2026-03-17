@@ -28,6 +28,31 @@ fn parseApiKeyField(allocator: std.mem.Allocator, value: std.json.Value) !?[]con
     };
 }
 
+fn parseClaudeCliConfig(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !types.ClaudeCliConfig {
+    var cfg = types.ClaudeCliConfig{};
+    if (obj.get("allowed_tools")) |v| {
+        if (v == .array) cfg.allowed_tools = try parseStringArray(allocator, v.array);
+    }
+    if (obj.get("disallowed_tools")) |v| {
+        if (v == .array) cfg.disallowed_tools = try parseStringArray(allocator, v.array);
+    }
+    if (obj.get("max_turns")) |v| {
+        if (v == .integer) cfg.max_turns = @intCast(v.integer);
+    }
+    if (obj.get("effort")) |v| {
+        if (v == .string) cfg.effort = try allocator.dupe(u8, v.string);
+    }
+    if (obj.get("max_budget_usd")) |v| switch (v) {
+        .float => |f| cfg.max_budget_usd = f,
+        .integer => |i| cfg.max_budget_usd = @floatFromInt(i),
+        else => {},
+    };
+    if (obj.get("skip_permissions")) |v| {
+        if (v == .bool) cfg.skip_permissions = v.bool;
+    }
+    return cfg;
+}
+
 fn splitPrimaryModelRef(primary: []const u8) ?struct { provider: []const u8, model: []const u8 } {
     // Handle custom: prefix specially (e.g., "custom:https://example.com/v2/model")
     if (std.mem.startsWith(u8, primary, "custom:")) {
@@ -1728,6 +1753,11 @@ pub fn parseJson(self: *Config, content: []const u8) !void {
                         }
                         if (val.object.get("user_agent")) |ua| {
                             if (ua == .string) pe.user_agent = try self.allocator.dupe(u8, ua.string);
+                        }
+                        if (val.object.get("claude_cli")) |cc| {
+                            if (cc == .object) {
+                                pe.claude_cli = try parseClaudeCliConfig(self.allocator, cc.object);
+                            }
                         }
                         try prov_list.append(self.allocator, pe);
                     }

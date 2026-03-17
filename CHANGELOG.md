@@ -9,6 +9,14 @@ This project uses [CalVer](https://calver.org/) versioning (YYYY.M.D).
 
 ### Added
 
+- **Claude CLI provider enhancements** (`src/providers/claude_cli.zig`): research-grade headless mode for using Claude Code as an LLM backend
+  - Session continuity via `--resume` — multi-turn conversations without resending history
+  - System prompt passthrough via `--system-prompt` flag (first call only; session retains it)
+  - Configurable tool control: `allowed_tools` / `disallowed_tools` mapped to `--allowedTools` / `--disallowedTools`
+  - Streaming support: `supports_streaming` and `stream_chat` vtable entries with `stream-json` output parsing
+  - Token usage extraction from CLI result events (`input_tokens`, `output_tokens`)
+  - New `ClaudeCliConfig` struct in `config_types.zig` with fields: `allowed_tools`, `disallowed_tools`, `max_turns`, `effort`, `max_budget_usd`, `skip_permissions`
+  - Config wired through `ProviderEntry.claude_cli`, `getProviderClaudeCliConfig()` accessor, JSON parse/save, and `RuntimeProviderBundle`
 - **CDP browser automation** (`src/cdp.zig`, `src/browser_session.zig`): Chrome DevTools Protocol transport over raw TCP WebSocket, with background reader thread and JSON-RPC request/response routing
   - Browser tool rewritten with 11 CDP-backed actions: `navigate`, `click`, `type`, `read`, `screenshot`, `scroll`, `wait`, `run_js`, `back`, `close`, plus `open` as backward-compatible alias
   - Session manager supporting multiple named sessions with configurable limits (`max_sessions`)

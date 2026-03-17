@@ -201,6 +201,14 @@ pub const Config = struct {
         return null;
     }
 
+    /// Look up Claude CLI-specific configuration for a provider.
+    pub fn getProviderClaudeCliConfig(self: *const Config, name: []const u8) ?config_types.ClaudeCliConfig {
+        for (self.providers) |e| {
+            if (std.mem.eql(u8, e.name, name)) return e.claude_cli;
+        }
+        return null;
+    }
+
     /// Sync flat convenience fields from the nested sub-configs.
     pub fn syncFlatFields(self: *Config) void {
         self.temperature = self.default_temperature;
@@ -613,6 +621,53 @@ pub const Config = struct {
                         if (has_field) try w.print(", ", .{});
                         try w.print("\"user_agent\": ", .{});
                         try writePrettyJsonInline(self.allocator, w, ua, "");
+                        has_field = true;
+                    }
+                }
+                if (comptime @hasField(ProviderEntry, "claude_cli")) {
+                    if (entry.claude_cli) |cc| {
+                        if (has_field) try w.print(", ", .{});
+                        try w.print("\"claude_cli\": {{", .{});
+                        var cc_field = false;
+                        if (cc.allowed_tools.len > 0) {
+                            try w.print("\"allowed_tools\": [", .{});
+                            for (cc.allowed_tools, 0..) |t, ti| {
+                                if (ti > 0) try w.print(", ", .{});
+                                try w.print("\"{s}\"", .{t});
+                            }
+                            try w.print("]", .{});
+                            cc_field = true;
+                        }
+                        if (cc.disallowed_tools.len > 0) {
+                            if (cc_field) try w.print(", ", .{});
+                            try w.print("\"disallowed_tools\": [", .{});
+                            for (cc.disallowed_tools, 0..) |t, ti| {
+                                if (ti > 0) try w.print(", ", .{});
+                                try w.print("\"{s}\"", .{t});
+                            }
+                            try w.print("]", .{});
+                            cc_field = true;
+                        }
+                        if (cc.max_turns > 0) {
+                            if (cc_field) try w.print(", ", .{});
+                            try w.print("\"max_turns\": {d}", .{cc.max_turns});
+                            cc_field = true;
+                        }
+                        if (cc.effort) |eff| {
+                            if (cc_field) try w.print(", ", .{});
+                            try w.print("\"effort\": \"{s}\"", .{eff});
+                            cc_field = true;
+                        }
+                        if (cc.max_budget_usd > 0) {
+                            if (cc_field) try w.print(", ", .{});
+                            try w.print("\"max_budget_usd\": {d}", .{cc.max_budget_usd});
+                            cc_field = true;
+                        }
+                        if (!cc.skip_permissions) {
+                            if (cc_field) try w.print(", ", .{});
+                            try w.print("\"skip_permissions\": false", .{});
+                        }
+                        try w.print("}}", .{});
                         has_field = true;
                     }
                 }

@@ -46,6 +46,9 @@ pub const RuntimeProviderBundle = struct {
             cfg.getProviderNativeTools(cfg.default_provider),
             cfg.getProviderUserAgent(cfg.default_provider),
         );
+        if (cfg.getProviderClaudeCliConfig(cfg.default_provider)) |cli_cfg| {
+            primary_holder.configureClaudeCli(cli_cfg);
+        }
 
         const allows_key_rotation = factory.classifyProvider(cfg.default_provider) != .openai_codex_provider;
         var rotating_key_count: usize = 0;
@@ -91,6 +94,9 @@ pub const RuntimeProviderBundle = struct {
                     cfg.getProviderNativeTools(provider_name),
                     cfg.getProviderUserAgent(provider_name),
                 );
+                if (cfg.getProviderClaudeCliConfig(provider_name)) |cli_cfg| {
+                    bundle.extra_holders.?[extra_i].configureClaudeCli(cli_cfg);
+                }
                 bundle.extra_holders_initialized = extra_i + 1;
                 bundle.reliable_entries.?[extra_i] = .{
                     .name = provider_name,

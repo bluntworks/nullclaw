@@ -259,6 +259,15 @@ pub const ProviderHolder = union(enum) {
     codex_cli: codex_cli.CodexCliProvider,
     openai_codex: openai_codex.OpenAiCodexProvider,
 
+    /// Apply Claude CLI-specific configuration to the active variant.
+    /// No-op if the active variant is not claude_cli.
+    pub fn configureClaudeCli(self: *ProviderHolder, config: @import("../config_types.zig").ClaudeCliConfig) void {
+        switch (self.*) {
+            .claude_cli => |*p| p.config = config,
+            else => {},
+        }
+    }
+
     /// Obtain the vtable-based Provider interface from whichever variant is active.
     pub fn provider(self: *ProviderHolder) Provider {
         return switch (self.*) {
