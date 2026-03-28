@@ -2,6 +2,8 @@ const std = @import("std");
 const root = @import("root.zig");
 const config_types = @import("../config_types.zig");
 
+const log = std.log.scoped(.claude_cli);
+
 const Provider = root.Provider;
 const ChatRequest = root.ChatRequest;
 const ChatResponse = root.ChatResponse;
@@ -21,6 +23,8 @@ pub const ClaudeCliProvider = struct {
     model: []const u8,
     session_id: ?[]const u8 = null,
     config: config_types.ClaudeCliConfig = .{},
+    max_turns_buf: [16]u8 = undefined,
+    budget_buf: [24]u8 = undefined,
 
     const DEFAULT_MODEL = "claude-opus-4-6";
     const CLI_NAME = "claude";
@@ -151,6 +155,9 @@ pub const ClaudeCliProvider = struct {
         };
         defer allocator.free(stdout_result);
 
+        const stderr_result = child.stderr.?.readToEndAlloc(allocator, MAX_OUTPUT) catch "";
+        defer if (stderr_result.len > 0) allocator.free(stderr_result);
+
         const term = try child.wait();
 
         var accumulated: std.ArrayList(u8) = .empty;
@@ -207,9 +214,17 @@ pub const ClaudeCliProvider = struct {
 
         switch (term) {
             .Exited => |code| {
-                if (code != 0 and accumulated.items.len == 0) return error.CliProcessFailed;
+                if (code != 0 and accumulated.items.len == 0) {
+                    if (stderr_result.len > 0) log.err("claude-cli stderr: {s}", .{stderr_result});
+                    return error.CliProcessFailed;
+                }
             },
-            else => if (accumulated.items.len == 0) return error.CliProcessFailed,
+            else => {
+                if (accumulated.items.len == 0) {
+                    if (stderr_result.len > 0) log.err("claude-cli stderr: {s}", .{stderr_result});
+                    return error.CliProcessFailed;
+                }
+            },
         }
 
         const content = try allocator.dupe(u8, accumulated.items);
@@ -250,12 +265,21 @@ pub const ClaudeCliProvider = struct {
         };
         defer allocator.free(stdout_result);
 
+        const stderr_result = child.stderr.?.readToEndAlloc(allocator, MAX_OUTPUT) catch "";
+        defer if (stderr_result.len > 0) allocator.free(stderr_result);
+
         const term = try child.wait();
         switch (term) {
             .Exited => |code| {
-                if (code != 0) return error.CliProcessFailed;
+                if (code != 0) {
+                    if (stderr_result.len > 0) log.err("claude-cli stderr: {s}", .{stderr_result});
+                    return error.CliProcessFailed;
+                }
             },
-            else => return error.CliProcessFailed,
+            else => {
+                if (stderr_result.len > 0) log.err("claude-cli stderr: {s}", .{stderr_result});
+                return error.CliProcessFailed;
+            },
         }
 
         var result = try parseStreamJson(allocator, stdout_result);
@@ -272,7 +296,7 @@ pub const ClaudeCliProvider = struct {
     }
 
     /// Build the CLI argument vector based on config and state.
-    pub fn buildArgv(self: *const ClaudeCliProvider, buf: [][]const u8, prompt: []const u8, model: []const u8, system_prompt: ?[]const u8, streaming: bool) ![]const []const u8 {
+    pub fn buildArgv(self: *ClaudeCliProvider, buf: [][]const u8, prompt: []const u8, model: []const u8, system_prompt: ?[]const u8, streaming: bool) ![]const []const u8 {
         var i: usize = 0;
 
         buf[i] = CLI_NAME;
@@ -285,11 +309,16 @@ pub const ClaudeCliProvider = struct {
         i += 1;
         buf[i] = if (streaming) "stream-json" else "json";
         i += 1;
+
+        // Claude CLI requires --verbose when using stream-json with -p
+        if (streaming) {
+            buf[i] = "--verbose";
+            i += 1;
+        }
+
         buf[i] = "--model";
         i += 1;
         buf[i] = model;
-        i += 1;
-        buf[i] = "--verbose";
         i += 1;
 
         // Session resume
@@ -328,11 +357,23 @@ pub const ClaudeCliProvider = struct {
         if (self.config.max_turns > 0) {
             buf[i] = "--max-turns";
             i += 1;
-            // Store the formatted string in a comptime-known way isn't possible,
-            // so we use a static buffer approach via the caller's stack.
-            // For simplicity, skip dynamic formatting — the caller passes config values.
-            // Instead, we'll format at call time.
-            buf[i] = ""; // placeholder; see note below
+            buf[i] = std.fmt.bufPrint(&self.max_turns_buf, "{d}", .{self.config.max_turns}) catch unreachable;
+            i += 1;
+        }
+
+        // Effort level
+        if (self.config.effort) |effort| {
+            buf[i] = "--effort";
+            i += 1;
+            buf[i] = effort;
+            i += 1;
+        }
+
+        // Max budget
+        if (self.config.max_budget_usd > 0) {
+            buf[i] = "--max-budget-usd";
+            i += 1;
+            buf[i] = std.fmt.bufPrint(&self.budget_buf, "{d}", .{self.config.max_budget_usd}) catch unreachable;
             i += 1;
         }
 
@@ -631,7 +672,7 @@ test "buildArgv base flags" {
     prov.config.skip_permissions = false;
     var buf: [32][]const u8 = undefined;
     const argv = try prov.buildArgv(&buf, "hello", "claude-opus-4-6", null, false);
-    try std.testing.expectEqual(@as(usize, 8), argv.len);
+    try std.testing.expectEqual(@as(usize, 7), argv.len);
     try std.testing.expectEqualStrings("claude", argv[0]);
     try std.testing.expectEqualStrings("-p", argv[1]);
     try std.testing.expectEqualStrings("hello", argv[2]);
@@ -639,7 +680,10 @@ test "buildArgv base flags" {
     try std.testing.expectEqualStrings("json", argv[4]);
     try std.testing.expectEqualStrings("--model", argv[5]);
     try std.testing.expectEqualStrings("claude-opus-4-6", argv[6]);
-    try std.testing.expectEqualStrings("--verbose", argv[7]);
+    // --verbose is intentionally NOT included
+    for (argv) |arg| {
+        try std.testing.expect(!std.mem.eql(u8, arg, "--verbose"));
+    }
 }
 
 test "buildArgv with streaming format" {
@@ -651,6 +695,12 @@ test "buildArgv with streaming format" {
     var buf: [32][]const u8 = undefined;
     const argv = try prov.buildArgv(&buf, "hello", "claude-opus-4-6", null, true);
     try std.testing.expectEqualStrings("stream-json", argv[4]);
+    // --verbose must be present when streaming
+    var found_verbose = false;
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--verbose")) found_verbose = true;
+    }
+    try std.testing.expect(found_verbose);
 }
 
 test "buildArgv with session resume" {
@@ -730,7 +780,7 @@ test "buildArgv with skip_permissions" {
     try std.testing.expect(found);
 }
 
-test "buildArgv with max_turns" {
+test "buildArgv with max_turns formats numeric value" {
     var prov = ClaudeCliProvider{
         .allocator = std.testing.allocator,
         .model = "claude-opus-4-6",
@@ -739,10 +789,61 @@ test "buildArgv with max_turns" {
     var buf: [32][]const u8 = undefined;
     const argv = try prov.buildArgv(&buf, "hello", "claude-opus-4-6", null, false);
     var found = false;
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--max-turns")) found = true;
+    for (argv, 0..) |arg, idx| {
+        if (std.mem.eql(u8, arg, "--max-turns")) {
+            found = true;
+            try std.testing.expectEqualStrings("5", argv[idx + 1]);
+        }
     }
     try std.testing.expect(found);
+}
+
+test "buildArgv with effort" {
+    var prov = ClaudeCliProvider{
+        .allocator = std.testing.allocator,
+        .model = "claude-opus-4-6",
+        .config = .{ .effort = "high", .skip_permissions = false },
+    };
+    var buf: [32][]const u8 = undefined;
+    const argv = try prov.buildArgv(&buf, "hello", "claude-opus-4-6", null, false);
+    var found = false;
+    for (argv, 0..) |arg, idx| {
+        if (std.mem.eql(u8, arg, "--effort")) {
+            found = true;
+            try std.testing.expectEqualStrings("high", argv[idx + 1]);
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "buildArgv with max_budget_usd" {
+    var prov = ClaudeCliProvider{
+        .allocator = std.testing.allocator,
+        .model = "claude-opus-4-6",
+        .config = .{ .max_budget_usd = 1.5, .skip_permissions = false },
+    };
+    var buf: [32][]const u8 = undefined;
+    const argv = try prov.buildArgv(&buf, "hello", "claude-opus-4-6", null, false);
+    var found = false;
+    for (argv, 0..) |arg, idx| {
+        if (std.mem.eql(u8, arg, "--max-budget-usd")) {
+            found = true;
+            try std.testing.expectEqualStrings("1.5", argv[idx + 1]);
+        }
+    }
+    try std.testing.expect(found);
+}
+
+test "buildArgv does not include verbose" {
+    var prov = ClaudeCliProvider{
+        .allocator = std.testing.allocator,
+        .model = "claude-opus-4-6",
+    };
+    var buf: [32][]const u8 = undefined;
+    const argv = try prov.buildArgv(&buf, "hello", "claude-opus-4-6", null, false);
+    for (argv) |arg| {
+        try std.testing.expect(!std.mem.eql(u8, arg, "--verbose"));
+    }
 }
 
 test "ClaudeCliConfig default values" {

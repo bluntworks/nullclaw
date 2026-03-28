@@ -1018,6 +1018,7 @@ test "makeStreamingSinkForChannel filters web chunks" {
                     self.len += event.text.len;
                 },
                 .final => self.got_final = true,
+                .tool_call => {},
             }
         }
 
